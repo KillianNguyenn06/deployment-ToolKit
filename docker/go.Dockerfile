@@ -7,7 +7,7 @@ FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
 
 # Copy dependency files first so Docker can reuse the module-download layer.
-COPY go.mod go.sum ./
+COPY go.mod go.sum* ./
 RUN go mod download
 
 COPY . .
