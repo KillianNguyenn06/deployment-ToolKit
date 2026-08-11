@@ -1,3 +1,4 @@
 .env
 sources/
 *.log
+.DS_Store
