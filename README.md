@@ -6,7 +6,7 @@ This repository provides one parameterized Jenkins job for building or deploying
 
 The Go repository must:
 
-- contain `go.mod` and `go.sum` at its root;
+- contain `go.mod` at its root (`go.sum` is used when present);
 - compile with `CGO_ENABLED=0`;
 - expose one buildable package, defaulting to `./cmd/server`;
 - listen on the port supplied through the `PORT` environment variable, default `8080`.
