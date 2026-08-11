@@ -1,0 +1,21 @@
+services:
+  go-backend:
+    image: "${GO_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    build:
+      context: "${GO_SOURCE_DIR}"
+      dockerfile: "${GO_DOCKERFILE}"
+      args:
+        GO_VERSION: "${GO_VERSION}"
+        GO_BUILD_PACKAGE: "${GO_BUILD_PACKAGE}"
+    environment:
+      APP_ENV: "${APP_ENV:-dev}"
+      PORT: "${CONTAINER_PORT:-8080}"
+    ports:
+      - "${HOST_PORT:-8080}:${CONTAINER_PORT:-8080}"
+    restart: unless-stopped
+    networks:
+      - application
+
+networks:
+  application:
+    name: "${COMPOSE_PROJECT_NAME:-deployment-dev}-network"
