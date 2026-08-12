@@ -28,6 +28,11 @@ pipeline {
             description: 'Target environment.'
         )
         string(
+            name: 'PROJECT_ID',
+            defaultValue: '',
+            description: 'Lowercase project slug used to isolate remote releases and Compose resources.'
+        )
+        string(
             name: 'GO_REPO_URL',
             defaultValue: '',
             description: 'HTTPS or SSH URL of the Go application repository.'
@@ -67,6 +72,31 @@ pipeline {
             defaultValue: true,
             description: 'Run go test ./... before building or deploying.'
         )
+        string(
+            name: 'LOCAL_SERVER_HOST',
+            defaultValue: '',
+            description: 'Internal Dev/QC Docker server hostname or IPv4 address.'
+        )
+        string(
+            name: 'LOCAL_SERVER_USER',
+            defaultValue: 'ubuntu',
+            description: 'SSH user on the local Docker server.'
+        )
+        string(
+            name: 'LOCAL_SERVER_BASE_DIR',
+            defaultValue: '/opt/deployment-toolkit',
+            description: 'Base deployment directory on the local Docker server.'
+        )
+        string(
+            name: 'SSH_CREDENTIALS_ID',
+            defaultValue: 'local-server-ssh',
+            description: 'Jenkins SSH Username with private key credential ID.'
+        )
+        string(
+            name: 'SSH_KNOWN_HOSTS_CREDENTIALS_ID',
+            defaultValue: 'local-server-known-hosts',
+            description: 'Jenkins Secret file credential ID containing the verified server host key.'
+        )
     }
 
     environment {
@@ -85,6 +115,21 @@ pipeline {
                     if (!params.GO_REPO_URL.trim()) {
                         error('GO_REPO_URL is required.')
                     }
+                    if (!(params.PROJECT_ID ==~ /[a-z0-9][a-z0-9-]{1,62}/)) {
+                        error('PROJECT_ID must be 2-63 lowercase letters, numbers, or hyphens.')
+                    }
+                    if (!(params.LOCAL_SERVER_HOST ==~ /[A-Za-z0-9.-]+/)) {
+                        error('LOCAL_SERVER_HOST must be a hostname or IPv4 address.')
+                    }
+                    if (!(params.LOCAL_SERVER_USER ==~ /[A-Za-z_][A-Za-z0-9_-]*/)) {
+                        error('LOCAL_SERVER_USER contains unsupported characters.')
+                    }
+                    if (!(params.LOCAL_SERVER_BASE_DIR ==~ /\/[A-Za-z0-9._\/-]+/)) {
+                        error('LOCAL_SERVER_BASE_DIR must be a safe absolute path without spaces.')
+                    }
+                    if (!params.SSH_CREDENTIALS_ID.trim() || !params.SSH_KNOWN_HOSTS_CREDENTIALS_ID.trim()) {
+                        error('Both SSH credential IDs are required.')
+                    }
                     if (!(env.APP_BRANCH ==~ /[A-Za-z0-9._\/-]+/)) {
                         error('BRANCH contains unsupported characters.')
                     }
@@ -100,12 +145,22 @@ pipeline {
                     if (!(params.HOST_PORT ==~ /[0-9]+/) || !(params.CONTAINER_PORT ==~ /[0-9]+/)) {
                         error('HOST_PORT and CONTAINER_PORT must be numeric.')
                     }
+
+                    def hostPort = params.HOST_PORT.toInteger()
+                    def containerPort = params.CONTAINER_PORT.toInteger()
+                    if (hostPort < 1 || hostPort > 65535 || containerPort < 1 || containerPort > 65535) {
+                        error('HOST_PORT and CONTAINER_PORT must be between 1 and 65535.')
+                    }
+
+                    env.REMOTE_RELEASE_DIR = "${params.LOCAL_SERVER_BASE_DIR}/projects/${params.PROJECT_ID}/releases/${env.BUILD_NUMBER}"
                 }
 
                 sh '''
                     set -eu
                     docker version
                     docker compose version
+                    ssh -V
+                    rsync --version
                 '''
             }
         }
@@ -166,50 +221,87 @@ pipeline {
             }
         }
 
-        stage('Build image') {
-            when {
-                expression { params.ACTION == 'build' }
-            }
+        stage('Prepare remote configuration') {
             steps {
-                withEnv(composeEnvironment()) {
-                    sh '''
-                        set -eu
-                        docker compose --file "$COMPOSE_FILE" build "$SERVICE"
-                    '''
+                script {
+                    writeFile file: '.env.remote', text: """\
+GO_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/go-backend
+GO_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/go.Dockerfile
+GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}
+GO_VERSION=${params.GO_VERSION}
+GO_IMAGE_REPOSITORY=${params.IMAGE_REPOSITORY}
+IMAGE_TAG=${env.IMAGE_TAG}
+APP_ENV=${params.ENVIRONMENT}
+HOST_PORT=${params.HOST_PORT}
+CONTAINER_PORT=${params.CONTAINER_PORT}
+COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
+"""
                 }
             }
         }
 
-        stage('Deploy') {
-            when {
-                expression { params.ACTION == 'deploy' }
-            }
+        stage('Sync release to local server') {
             steps {
-                withEnv(composeEnvironment()) {
-                    sh '''
+                sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+                    withCredentials([file(
+                        credentialsId: params.SSH_KNOWN_HOSTS_CREDENTIALS_ID,
+                        variable: 'SSH_KNOWN_HOSTS'
+                    )]) {
+                        sh '''
                         set -eu
-                        docker compose --file "$COMPOSE_FILE" up --build -d "$SERVICE"
-                    '''
+                        target="$LOCAL_SERVER_USER@$LOCAL_SERVER_HOST"
+
+                        ssh \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+                            "$target" \
+                            "command -v rsync >/dev/null && docker version && docker compose version && mkdir -p '$REMOTE_RELEASE_DIR/sources/go-backend'"
+
+                        rsync -az \
+                            --exclude='.git/' \
+                            --exclude='.env' \
+                            --exclude='.env.remote' \
+                            --exclude='sources/' \
+                            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+                            "$WORKSPACE/" \
+                            "$target:$REMOTE_RELEASE_DIR/"
+
+                        rsync -az \
+                            --exclude='.git/' \
+                            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+                            "$SOURCE_DIR/" \
+                            "$target:$REMOTE_RELEASE_DIR/sources/go-backend/"
+
+                        rsync -az \
+                            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+                            "$WORKSPACE/.env.remote" \
+                            "$target:$REMOTE_RELEASE_DIR/.env"
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Verify and measure') {
+        stage('Build or deploy on local server') {
             steps {
-                withEnv(composeEnvironment()) {
-                    sh '''
+                sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+                    withCredentials([file(
+                        credentialsId: params.SSH_KNOWN_HOSTS_CREDENTIALS_ID,
+                        variable: 'SSH_KNOWN_HOSTS'
+                    )]) {
+                        sh '''
                         set -eu
-                        docker image inspect "$GO_IMAGE_REPOSITORY:$IMAGE_TAG" \
-                            --format 'Image={{.RepoTags}} SizeBytes={{.Size}}'
-                        docker image ls "$GO_IMAGE_REPOSITORY:$IMAGE_TAG"
+                        target="$LOCAL_SERVER_USER@$LOCAL_SERVER_HOST"
 
-                        if [ "$ACTION" = "deploy" ]; then
-                            docker compose --file "$COMPOSE_FILE" ps "$SERVICE"
-                            container_id="$(docker compose --file "$COMPOSE_FILE" ps -q "$SERVICE")"
-                            test -n "$container_id"
-                            test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = "true"
-                        fi
-                    '''
+                        ssh \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+                            "$target" \
+                            "cd '$REMOTE_RELEASE_DIR' && ENV_FILE='$REMOTE_RELEASE_DIR/.env' bash scripts/deploy.sh '$ACTION'"
+                        '''
+                    }
                 }
             }
         }
@@ -217,16 +309,10 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: 'compose.yaml,docker/**', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'compose.yaml,docker/**,scripts/**,.env.remote', allowEmptyArchive: true
         }
         failure {
-            script {
-                if (fileExists('compose.yaml')) {
-                    withEnv(composeEnvironment()) {
-                        sh 'docker compose --file "$COMPOSE_FILE" ps || true'
-                    }
-                }
-            }
+            echo 'Pipeline failed. Review the failed stage and Jenkins console output.'
         }
     }
 }
