@@ -2,3 +2,4 @@
 .env.remote
 sources/
 *.log
+.DS_Store

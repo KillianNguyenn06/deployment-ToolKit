@@ -4,23 +4,19 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
     }
 
     parameters {
         choice(
             name: 'SERVICE',
-            choices: ['go-backend'],
-            description: 'Service to build or deploy. React, Ruby, and all are added after the Go pilot is verified.'
+            choices: ['go-backend', 'react-frontend'],
+            description: 'Application service to build or deploy.'
         )
         choice(
             name: 'ACTION',
             choices: ['build', 'deploy'],
             description: 'build creates an image; deploy also starts or updates the container.'
-        )
-        string(
-            name: 'BRANCH',
-            defaultValue: 'develop',
-            description: 'Application branch. Blank also falls back to develop.'
         )
         choice(
             name: 'ENVIRONMENT',
@@ -38,39 +34,139 @@ pipeline {
             description: 'HTTPS or SSH URL of the Go application repository.'
         )
         string(
+            name: 'GO_REPO_BRANCH',
+            defaultValue: 'develop',
+            description: 'Branch in the Go application repository. Blank falls back to develop.'
+        )
+        string(
+            name: 'REACT_REPO_URL',
+            defaultValue: '',
+            description: 'HTTPS or SSH URL of the React application repository.'
+        )
+        string(
+            name: 'REACT_REPO_BRANCH',
+            defaultValue: 'develop',
+            description: 'Branch in the React application repository. Blank falls back to develop.'
+        )
+        string(
             name: 'GIT_CREDENTIALS_ID',
             defaultValue: '',
-            description: 'Optional Jenkins credential ID for a private repository.'
+            description: 'Optional Jenkins credential ID shared by private application repositories.'
         )
         string(
             name: 'GO_BUILD_PACKAGE',
             defaultValue: './cmd/server',
-            description: 'Go package that produces the server binary.'
+            description: 'Go package that produces the application binary.'
         )
         string(
             name: 'GO_VERSION',
             defaultValue: '1.25',
-            description: 'Go builder image version. Set this to a version compatible with go.mod.'
+            description: 'Go builder image version compatible with go.mod.'
         )
         string(
-            name: 'IMAGE_REPOSITORY',
+            name: 'GO_IMAGE_REPOSITORY',
             defaultValue: 'local/go-backend',
-            description: 'Docker image repository/name, without the tag.'
+            description: 'Go Docker image repository/name, without the tag.'
         )
         string(
-            name: 'HOST_PORT',
+            name: 'GO_HOST_PORT',
             defaultValue: '8081',
-            description: 'Host port used when ACTION=deploy.'
+            description: 'Host port used by the Go service.'
         )
         string(
-            name: 'CONTAINER_PORT',
+            name: 'GO_CONTAINER_PORT',
             defaultValue: '8080',
-            description: 'Port on which the Go application listens inside the container.'
+            description: 'Port used by a long-running Go web service inside its container.'
+        )
+        choice(
+            name: 'GO_RESTART_POLICY',
+            choices: ['unless-stopped', 'on-failure', 'no'],
+            description: 'Restart behavior for the long-running Go backend container.'
+        )
+        string(
+            name: 'GO_MEMORY_LIMIT',
+            defaultValue: '256m',
+            description: 'Maximum runtime memory for the Go container.'
+        )
+        string(
+            name: 'GO_CPU_LIMIT',
+            defaultValue: '0.50',
+            description: 'Maximum CPU cores for the Go container.'
+        )
+        string(
+            name: 'NODE_VERSION',
+            defaultValue: '22',
+            description: 'Node.js major or full version used to build React.'
+        )
+        string(
+            name: 'NODE_BUILD_MEMORY_MB',
+            defaultValue: '768',
+            description: 'Maximum Node.js heap size used while linting and building React.'
+        )
+        string(
+            name: 'REACT_IMAGE_REPOSITORY',
+            defaultValue: 'local/react-frontend',
+            description: 'React Docker image repository/name, without the tag.'
+        )
+        string(
+            name: 'REACT_HOST_PORT',
+            defaultValue: '3000',
+            description: 'Host port used to access the React application.'
+        )
+        string(
+            name: 'REACT_CONTAINER_PORT',
+            defaultValue: '80',
+            description: 'Nginx port inside the React container.'
+        )
+        choice(
+            name: 'REACT_RESTART_POLICY',
+            choices: ['unless-stopped', 'on-failure', 'no'],
+            description: 'Restart behavior for the React web container.'
+        )
+        string(
+            name: 'REACT_MEMORY_LIMIT',
+            defaultValue: '256m',
+            description: 'Maximum runtime memory for the React/Nginx container.'
+        )
+        string(
+            name: 'REACT_CPU_LIMIT',
+            defaultValue: '0.50',
+            description: 'Maximum CPU cores for the React/Nginx container.'
+        )
+        string(
+            name: 'DOCKER_LOG_MAX_SIZE',
+            defaultValue: '10m',
+            description: 'Maximum size of one Docker JSON log file before rotation.'
+        )
+        string(
+            name: 'DOCKER_LOG_MAX_FILES',
+            defaultValue: '3',
+            description: 'Number of rotated Docker log files retained per container.'
+        )
+        string(
+            name: 'RELEASE_RETENTION',
+            defaultValue: '5',
+            description: 'Number of remote release directories retained per project.'
+        )
+        string(
+            name: 'IMAGE_RETENTION_HOURS',
+            defaultValue: '72',
+            description: 'Unused toolkit-managed images older than this are removed after success.'
+        )
+        booleanParam(
+            name: 'PRUNE_BUILD_CACHE',
+            defaultValue: true,
+            description: 'Remove unused Docker build cache older than BUILD_CACHE_RETENTION_HOURS after success.'
+        )
+        string(
+            name: 'BUILD_CACHE_RETENTION_HOURS',
+            defaultValue: '168',
+            description: 'Age threshold for unused Docker build cache cleanup.'
         )
         booleanParam(
             name: 'RUN_TESTS',
             defaultValue: true,
-            description: 'Run go test ./... before building or deploying.'
+            description: 'Run the selected service validation before building or deploying.'
         )
         string(
             name: 'LOCAL_SERVER_HOST',
@@ -79,7 +175,7 @@ pipeline {
         )
         string(
             name: 'LOCAL_SERVER_USER',
-            defaultValue: 'ubuntu',
+            defaultValue: '',
             description: 'SSH user on the local Docker server.'
         )
         string(
@@ -101,19 +197,22 @@ pipeline {
 
     environment {
         TOOLKIT_DIR = "${WORKSPACE}"
-        SOURCE_DIR = "${WORKSPACE}/sources/go-backend"
         COMPOSE_FILE = "${WORKSPACE}/compose.yaml"
-        GO_DOCKERFILE = "${WORKSPACE}/docker/go.Dockerfile"
     }
 
     stages {
         stage('Validate parameters') {
             steps {
                 script {
-                    env.APP_BRANCH = params.BRANCH.trim() ?: 'develop'
+                    def service = serviceConfiguration(params.SERVICE)
+                    env.APP_BRANCH = params[service.branchParameter].trim() ?: 'develop'
+                    env.APP_REPO_URL = params[service.repoParameter].trim()
+                    env.SOURCE_SUBDIR = service.sourceSubdir
+                    env.SOURCE_DIR = "${env.WORKSPACE}/sources/${service.sourceSubdir}"
+                    env.TARGET_IMAGE_REPOSITORY = params[service.imageParameter].trim()
 
-                    if (!params.GO_REPO_URL.trim()) {
-                        error('GO_REPO_URL is required.')
+                    if (!env.APP_REPO_URL) {
+                        error("${service.repoParameter} is required when SERVICE=${params.SERVICE}.")
                     }
                     if (!(params.PROJECT_ID ==~ /[a-z0-9][a-z0-9-]{1,62}/)) {
                         error('PROJECT_ID must be 2-63 lowercase letters, numbers, or hyphens.')
@@ -131,26 +230,45 @@ pipeline {
                         error('Both SSH credential IDs are required.')
                     }
                     if (!(env.APP_BRANCH ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error('BRANCH contains unsupported characters.')
+                        error("${service.branchParameter} contains unsupported characters.")
                     }
                     if (!(params.GO_BUILD_PACKAGE ==~ /[A-Za-z0-9._\/-]+/)) {
                         error('GO_BUILD_PACKAGE contains unsupported characters.')
                     }
-                    if (!(params.GO_VERSION ==~ /[0-9]+\.[0-9]+([.][0-9]+)?/)) {
-                        error('GO_VERSION must look like 1.25 or 1.25.1.')
+                    ['GO_IMAGE_REPOSITORY', 'REACT_IMAGE_REPOSITORY'].each { parameterName ->
+                        if (!(params[parameterName] ==~ /[A-Za-z0-9._\/-]+/)) {
+                            error("${parameterName} contains unsupported characters.")
+                        }
                     }
-                    if (!(params.IMAGE_REPOSITORY ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error('IMAGE_REPOSITORY contains unsupported characters.')
+                    validateVersion(params.GO_VERSION, 'GO_VERSION')
+                    validateVersion(params.NODE_VERSION, 'NODE_VERSION')
+                    ['GO_HOST_PORT', 'GO_CONTAINER_PORT', 'REACT_HOST_PORT', 'REACT_CONTAINER_PORT'].each { parameterName ->
+                        validatePort(params[parameterName], parameterName)
                     }
-                    if (!(params.HOST_PORT ==~ /[0-9]+/) || !(params.CONTAINER_PORT ==~ /[0-9]+/)) {
-                        error('HOST_PORT and CONTAINER_PORT must be numeric.')
+                    if (params.REACT_CONTAINER_PORT != '80') {
+                        error('REACT_CONTAINER_PORT must be 80 because the production Nginx image listens on port 80.')
                     }
-
-                    def hostPort = params.HOST_PORT.toInteger()
-                    def containerPort = params.CONTAINER_PORT.toInteger()
-                    if (hostPort < 1 || hostPort > 65535 || containerPort < 1 || containerPort > 65535) {
-                        error('HOST_PORT and CONTAINER_PORT must be between 1 and 65535.')
+                    ['GO_MEMORY_LIMIT', 'REACT_MEMORY_LIMIT'].each { parameterName ->
+                        if (!(params[parameterName] ==~ /[1-9][0-9]*[kKmMgG]/)) {
+                            error("${parameterName} must be a positive Docker memory value such as 256m or 1g.")
+                        }
                     }
+                    ['GO_CPU_LIMIT', 'REACT_CPU_LIMIT'].each { parameterName ->
+                        def cpuValue = params[parameterName]
+                        def isNumeric = cpuValue ==~ /[0-9]+(\.[0-9]+)?/
+                        def isZero = cpuValue ==~ /0+(\.0+)?/
+                        if (!isNumeric || isZero) {
+                            error("${parameterName} must be a positive CPU number such as 0.50 or 1.")
+                        }
+                    }
+                    if (!(params.DOCKER_LOG_MAX_SIZE ==~ /[1-9][0-9]*[kKmMgG]/)) {
+                        error('DOCKER_LOG_MAX_SIZE must be a positive size such as 10m.')
+                    }
+                    validatePositiveInteger(params.DOCKER_LOG_MAX_FILES, 'DOCKER_LOG_MAX_FILES', 10)
+                    validatePositiveInteger(params.RELEASE_RETENTION, 'RELEASE_RETENTION', 100)
+                    validatePositiveInteger(params.IMAGE_RETENTION_HOURS, 'IMAGE_RETENTION_HOURS', 8760)
+                    validatePositiveInteger(params.BUILD_CACHE_RETENTION_HOURS, 'BUILD_CACHE_RETENTION_HOURS', 8760)
+                    validatePositiveInteger(params.NODE_BUILD_MEMORY_MB, 'NODE_BUILD_MEMORY_MB', 8192)
 
                     env.REMOTE_RELEASE_DIR = "${params.LOCAL_SERVER_BASE_DIR}/projects/${params.PROJECT_ID}/releases/${env.BUILD_NUMBER}"
                 }
@@ -176,7 +294,7 @@ pipeline {
                 dir(env.SOURCE_DIR) {
                     deleteDir()
                     script {
-                        def remote = [url: params.GO_REPO_URL.trim()]
+                        def remote = [url: env.APP_REPO_URL]
                         if (params.GIT_CREDENTIALS_ID.trim()) {
                             remote.credentialsId = params.GIT_CREDENTIALS_ID.trim()
                         }
@@ -197,19 +315,38 @@ pipeline {
             }
         }
 
-        stage('Test') {
+        stage('Test application') {
             when {
                 expression { params.RUN_TESTS }
             }
             steps {
-                sh '''
-                    set -eu
-                    docker run --rm \
-                        -v "$SOURCE_DIR:/src" \
-                        -w /src \
-                        "golang:$GO_VERSION-bookworm" \
-                        go test ./...
-                '''
+                script {
+                    if (params.SERVICE == 'go-backend') {
+                        sh '''
+                            set -eu
+                            docker run --rm \
+                                --memory=1g \
+                                --cpus=1.0 \
+                                --pids-limit=256 \
+                                -v "$SOURCE_DIR:/src:ro" \
+                                -w /src \
+                                "golang:$GO_VERSION-bookworm" \
+                                go test ./...
+                        '''
+                    } else if (params.SERVICE == 'react-frontend') {
+                        sh '''
+                            set -eu
+                            docker run --rm \
+                                --memory=1g \
+                                --cpus=1.0 \
+                                --pids-limit=256 \
+                                -e "NODE_OPTIONS=--max-old-space-size=$NODE_BUILD_MEMORY_MB" \
+                                -v "$SOURCE_DIR:/source:ro" \
+                                "node:$NODE_VERSION-bookworm-slim" \
+                                sh -c 'cp -a /source/. /tmp/app && cd /tmp/app && npm ci && npm run lint && npm run build'
+                        '''
+                    }
+                }
             }
         }
 
@@ -225,15 +362,36 @@ pipeline {
             steps {
                 script {
                     writeFile file: '.env.remote', text: """\
+SERVICE=${params.SERVICE}
 GO_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/go-backend
 GO_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/go.Dockerfile
 GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}
 GO_VERSION=${params.GO_VERSION}
-GO_IMAGE_REPOSITORY=${params.IMAGE_REPOSITORY}
+GO_IMAGE_REPOSITORY=${params.GO_IMAGE_REPOSITORY}
+GO_HOST_PORT=${params.GO_HOST_PORT}
+GO_CONTAINER_PORT=${params.GO_CONTAINER_PORT}
+GO_RESTART_POLICY=${params.GO_RESTART_POLICY}
+GO_MEMORY_LIMIT=${params.GO_MEMORY_LIMIT}
+GO_CPU_LIMIT=${params.GO_CPU_LIMIT}
+REACT_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/react-frontend
+REACT_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/react.Dockerfile
+NODE_VERSION=${params.NODE_VERSION}
+NODE_BUILD_MEMORY_MB=${params.NODE_BUILD_MEMORY_MB}
+REACT_IMAGE_REPOSITORY=${params.REACT_IMAGE_REPOSITORY}
+REACT_HOST_PORT=${params.REACT_HOST_PORT}
+REACT_CONTAINER_PORT=${params.REACT_CONTAINER_PORT}
+REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}
+REACT_MEMORY_LIMIT=${params.REACT_MEMORY_LIMIT}
+REACT_CPU_LIMIT=${params.REACT_CPU_LIMIT}
+DOCKER_LOG_MAX_SIZE=${params.DOCKER_LOG_MAX_SIZE}
+DOCKER_LOG_MAX_FILES=${params.DOCKER_LOG_MAX_FILES}
+RELEASE_RETENTION=${params.RELEASE_RETENTION}
+IMAGE_RETENTION_HOURS=${params.IMAGE_RETENTION_HOURS}
+PRUNE_BUILD_CACHE=${params.PRUNE_BUILD_CACHE}
+BUILD_CACHE_RETENTION_HOURS=${params.BUILD_CACHE_RETENTION_HOURS}
+TARGET_IMAGE_REPOSITORY=${env.TARGET_IMAGE_REPOSITORY}
 IMAGE_TAG=${env.IMAGE_TAG}
 APP_ENV=${params.ENVIRONMENT}
-HOST_PORT=${params.HOST_PORT}
-CONTAINER_PORT=${params.CONTAINER_PORT}
 COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
 """
                 }
@@ -256,7 +414,7 @@ COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
                             -o StrictHostKeyChecking=yes \
                             -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
                             "$target" \
-                            "command -v rsync >/dev/null && docker version && docker compose version && mkdir -p '$REMOTE_RELEASE_DIR/sources/go-backend'"
+                            "command -v rsync >/dev/null && docker version && docker compose version && mkdir -p '$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR'"
 
                         rsync -az \
                             --exclude='.git/' \
@@ -269,9 +427,11 @@ COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
 
                         rsync -az \
                             --exclude='.git/' \
+                            --exclude='node_modules/' \
+                            --exclude='dist/' \
                             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
                             "$SOURCE_DIR/" \
-                            "$target:$REMOTE_RELEASE_DIR/sources/go-backend/"
+                            "$target:$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR/"
 
                         rsync -az \
                             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
@@ -317,19 +477,81 @@ COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
     }
 }
 
+def serviceConfiguration(String serviceName) {
+    def services = [
+        'go-backend': [
+            repoParameter: 'GO_REPO_URL',
+            branchParameter: 'GO_REPO_BRANCH',
+            imageParameter: 'GO_IMAGE_REPOSITORY',
+            sourceSubdir: 'go-backend'
+        ],
+        'react-frontend': [
+            repoParameter: 'REACT_REPO_URL',
+            branchParameter: 'REACT_REPO_BRANCH',
+            imageParameter: 'REACT_IMAGE_REPOSITORY',
+            sourceSubdir: 'react-frontend'
+        ]
+    ]
+
+    if (!services.containsKey(serviceName)) {
+        error("Unsupported SERVICE: ${serviceName}")
+    }
+    return services[serviceName]
+}
+
+def validateVersion(String value, String parameterName) {
+    if (!(value ==~ /[0-9]+(\.[0-9]+){0,2}/)) {
+        error("${parameterName} must be a numeric version such as 22, 22.4, or 22.4.1.")
+    }
+}
+
+def validatePort(String value, String parameterName) {
+    if (!(value ==~ /[0-9]+/)) {
+        error("${parameterName} must be numeric.")
+    }
+    def port = value.toInteger()
+    if (port < 1 || port > 65535) {
+        error("${parameterName} must be between 1 and 65535.")
+    }
+}
+
+def validatePositiveInteger(String value, String parameterName, Integer maximum) {
+    if (!(value ==~ /[1-9][0-9]*/)) {
+        error("${parameterName} must be a positive whole number.")
+    }
+    if (value.toInteger() > maximum) {
+        error("${parameterName} must not exceed ${maximum}.")
+    }
+}
+
 def composeEnvironment() {
     return [
         "SERVICE=${params.SERVICE}",
-        "ACTION=${params.ACTION}",
         "APP_ENV=${params.ENVIRONMENT}",
-        "GO_SOURCE_DIR=${env.SOURCE_DIR}",
-        "GO_DOCKERFILE=${env.GO_DOCKERFILE}",
+        "GO_SOURCE_DIR=${env.WORKSPACE}/sources/go-backend",
+        "GO_DOCKERFILE=${env.WORKSPACE}/docker/go.Dockerfile",
         "GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}",
         "GO_VERSION=${params.GO_VERSION}",
-        "GO_IMAGE_REPOSITORY=${params.IMAGE_REPOSITORY}",
+        "GO_IMAGE_REPOSITORY=${params.GO_IMAGE_REPOSITORY}",
+        "GO_HOST_PORT=${params.GO_HOST_PORT}",
+        "GO_CONTAINER_PORT=${params.GO_CONTAINER_PORT}",
+        "GO_RESTART_POLICY=${params.GO_RESTART_POLICY}",
+        "GO_MEMORY_LIMIT=${params.GO_MEMORY_LIMIT}",
+        "GO_CPU_LIMIT=${params.GO_CPU_LIMIT}",
+        "REACT_SOURCE_DIR=${env.WORKSPACE}/sources/react-frontend",
+        "REACT_DOCKERFILE=${env.WORKSPACE}/docker/react.Dockerfile",
+        "NODE_VERSION=${params.NODE_VERSION}",
+        "NODE_BUILD_MEMORY_MB=${params.NODE_BUILD_MEMORY_MB}",
+        "REACT_IMAGE_REPOSITORY=${params.REACT_IMAGE_REPOSITORY}",
+        "REACT_HOST_PORT=${params.REACT_HOST_PORT}",
+        "REACT_CONTAINER_PORT=${params.REACT_CONTAINER_PORT}",
+        "REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}",
+        "REACT_MEMORY_LIMIT=${params.REACT_MEMORY_LIMIT}",
+        "REACT_CPU_LIMIT=${params.REACT_CPU_LIMIT}",
+        "DOCKER_LOG_MAX_SIZE=${params.DOCKER_LOG_MAX_SIZE}",
+        "DOCKER_LOG_MAX_FILES=${params.DOCKER_LOG_MAX_FILES}",
+        "TARGET_IMAGE_REPOSITORY=${env.TARGET_IMAGE_REPOSITORY}",
         "IMAGE_TAG=${env.IMAGE_TAG}",
-        "HOST_PORT=${params.HOST_PORT}",
-        "CONTAINER_PORT=${params.CONTAINER_PORT}",
-        "COMPOSE_PROJECT_NAME=deployment-${params.ENVIRONMENT}"
+        "COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}"
     ]
 }
