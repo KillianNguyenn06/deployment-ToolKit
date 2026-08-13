@@ -23,8 +23,7 @@ The Go repository must:
 - expose one buildable package, configured with `GO_BUILD_PACKAGE`;
 - use the `PORT` environment variable if it is a web service.
 
-The final image uses a distroless non-root runtime. A CLI application can be verified through its container process and logs instead of HTTP.
-CLI deployments default to `GO_RESTART_POLICY=no`, so an infinite-loop utility does not automatically return after Docker or the host restarts.
+The final image uses a distroless non-root runtime. The deployed Go backend is treated as a long-running service and should provide a health or HTTP endpoint for runtime verification.
 
 ### React
 
@@ -52,6 +51,8 @@ After a successful build or deployment, the toolkit:
 Image cleanup is restricted through toolkit and project labels. Build-cache cleanup is Docker-host-wide but only removes unused cache older than the configured threshold; disable it on a shared builder by setting `PRUNE_BUILD_CACHE=false`.
 
 These settings apply when Compose creates or recreates a container. They do not retroactively limit an already-running container created by an earlier version of the toolkit.
+
+See [`docs/RESOURCE_SAFEGUARDS.md`](docs/RESOURCE_SAFEGUARDS.md) for parameter selection, verification commands and troubleshooting.
 
 ## 3. Service configuration
 
@@ -161,16 +162,16 @@ Use values matching the Go application:
 |---|---|
 | `SERVICE` | `go-backend` |
 | `ACTION` | `build`, then `deploy` |
-| `PROJECT_ID` | `calendar` |
+| `PROJECT_ID` | A reusable project slug, such as `customer-portal` |
 | `GO_REPO_URL` | Go repository SSH URL |
 | `GO_REPO_BRANCH` | `develop` |
 | `GIT_CREDENTIALS_ID` | GitHub credential ID |
 | `GO_BUILD_PACKAGE` | `.` or `./cmd/server` |
 | `GO_VERSION` | Version compatible with `go.mod` |
-| `GO_IMAGE_REPOSITORY` | `local/calendar` |
+| `GO_IMAGE_REPOSITORY` | `local/go-backend` |
 | `GO_HOST_PORT` | `8081` |
 | `GO_CONTAINER_PORT` | `8080` |
-| `GO_RESTART_POLICY` | `no` for the Calendar CLI |
+| `GO_RESTART_POLICY` | `unless-stopped` |
 | `GO_MEMORY_LIMIT` | `256m` |
 | `GO_CPU_LIMIT` | `0.50` |
 
@@ -178,19 +179,19 @@ The unused React parameters may retain their defaults.
 
 ## 9. React build or deployment
 
-Use these initial values for the employee directory:
+Use values matching the React application:
 
 | Parameter | Value |
 |---|---|
 | `SERVICE` | `react-frontend` |
 | `ACTION` | `build`, then `deploy` |
-| `PROJECT_ID` | `employee-directory` |
-| `REACT_REPO_URL` | `git@github.com:KillianNguyenn06/employee-directory.git` |
+| `PROJECT_ID` | The same project slug used by its related services |
+| `REACT_REPO_URL` | React repository SSH or HTTPS URL |
 | `REACT_REPO_BRANCH` | `develop` |
 | `GIT_CREDENTIALS_ID` | Existing GitHub credential ID |
 | `NODE_VERSION` | `22` |
 | `NODE_BUILD_MEMORY_MB` | `768` |
-| `REACT_IMAGE_REPOSITORY` | `local/employee-directory` |
+| `REACT_IMAGE_REPOSITORY` | `local/react-frontend` |
 | `REACT_HOST_PORT` | `3000` |
 | `REACT_CONTAINER_PORT` | `80` |
 | `REACT_RESTART_POLICY` | `unless-stopped` |
@@ -209,7 +210,7 @@ docker compose ps
 curl http://localhost:3000/
 ```
 
-Unlike the CLI Go pilot, React is served over HTTP, so `curl` is a valid runtime check.
+React is served over HTTP, so `curl` is a valid runtime check.
 The React container port remains `80` because that is the port used by the production Nginx runtime; change only the host port when avoiding a server-side conflict.
 
 ## 10. Releases and IR evidence
