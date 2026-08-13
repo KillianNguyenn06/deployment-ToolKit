@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 
 ARG NODE_VERSION=22
-ARG NODE_BUILD_MEMORY_MB=768
 
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
+ARG NODE_BUILD_MEMORY_MB=768
 
 WORKDIR /app
 
