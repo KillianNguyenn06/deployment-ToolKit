@@ -254,7 +254,10 @@ pipeline {
                         }
                     }
                     ['GO_CPU_LIMIT', 'REACT_CPU_LIMIT'].each { parameterName ->
-                        if (!(params[parameterName] ==~ /[0-9]+(\.[0-9]+)?/) || params[parameterName].toBigDecimal() <= 0) {
+                        def cpuValue = params[parameterName]
+                        def isNumeric = cpuValue ==~ /[0-9]+(\.[0-9]+)?/
+                        def isZero = cpuValue ==~ /0+(\.0+)?/
+                        if (!isNumeric || isZero) {
                             error("${parameterName} must be a positive CPU number such as 0.50 or 1.")
                         }
                     }
