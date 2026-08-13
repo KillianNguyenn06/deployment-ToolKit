@@ -80,8 +80,8 @@ pipeline {
         )
         choice(
             name: 'GO_RESTART_POLICY',
-            choices: ['no', 'on-failure', 'unless-stopped'],
-            description: 'Use no for CLI programs; use unless-stopped only for long-running services.'
+            choices: ['unless-stopped', 'on-failure', 'no'],
+            description: 'Restart behavior for the long-running Go backend container.'
         )
         string(
             name: 'GO_MEMORY_LIMIT',
