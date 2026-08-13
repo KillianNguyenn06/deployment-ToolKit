@@ -7,12 +7,58 @@ services:
       args:
         GO_VERSION: "${GO_VERSION}"
         GO_BUILD_PACKAGE: "${GO_BUILD_PACKAGE}"
+      labels:
+        com.deployment-toolkit.managed: "true"
+        com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+        com.deployment-toolkit.service: "go-backend"
     environment:
       APP_ENV: "${APP_ENV:-dev}"
-      PORT: "${CONTAINER_PORT:-8080}"
+      PORT: "${GO_CONTAINER_PORT:-8080}"
     ports:
-      - "${HOST_PORT:-8080}:${CONTAINER_PORT:-8080}"
-    restart: unless-stopped
+      - "${GO_HOST_PORT:-8081}:${GO_CONTAINER_PORT:-8080}"
+    restart: "${GO_RESTART_POLICY:-no}"
+    mem_limit: "${GO_MEMORY_LIMIT:-256m}"
+    cpus: "${GO_CPU_LIMIT:-0.50}"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+        max-file: "${DOCKER_LOG_MAX_FILES:-3}"
+    labels:
+      com.deployment-toolkit.managed: "true"
+      com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+      com.deployment-toolkit.service: "go-backend"
+    networks:
+      - application
+
+  react-frontend:
+    image: "${REACT_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    build:
+      context: "${REACT_SOURCE_DIR}"
+      dockerfile: "${REACT_DOCKERFILE}"
+      args:
+        NODE_VERSION: "${NODE_VERSION}"
+        NODE_BUILD_MEMORY_MB: "${NODE_BUILD_MEMORY_MB:-768}"
+      labels:
+        com.deployment-toolkit.managed: "true"
+        com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+        com.deployment-toolkit.service: "react-frontend"
+    ports:
+      - "${REACT_HOST_PORT:-3000}:${REACT_CONTAINER_PORT:-80}"
+    restart: "${REACT_RESTART_POLICY:-unless-stopped}"
+    mem_limit: "${REACT_MEMORY_LIMIT:-256m}"
+    cpus: "${REACT_CPU_LIMIT:-0.50}"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+        max-file: "${DOCKER_LOG_MAX_FILES:-3}"
+    labels:
+      com.deployment-toolkit.managed: "true"
+      com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+      com.deployment-toolkit.service: "react-frontend"
     networks:
       - application
 

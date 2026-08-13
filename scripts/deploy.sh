@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env}"
 ACTION="${1:-build}"
-SERVICE="go-backend"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
     echo "[ERROR] Environment file not found: ${ENV_FILE}" >&2
@@ -19,6 +18,79 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 docker compose version >/dev/null
+
+set -a
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+set +a
+
+case "${SERVICE:-}" in
+    go-backend|react-frontend)
+        ;;
+    *)
+        echo "[ERROR] Unsupported or missing SERVICE: ${SERVICE:-<empty>}" >&2
+        exit 1
+        ;;
+esac
+
+if [[ -z "${TARGET_IMAGE_REPOSITORY:-}" || -z "${IMAGE_TAG:-}" ]]; then
+    echo "[ERROR] TARGET_IMAGE_REPOSITORY and IMAGE_TAG are required." >&2
+    exit 1
+fi
+
+if [[ ! "${RELEASE_RETENTION:-5}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] RELEASE_RETENTION must be a positive whole number." >&2
+    exit 1
+fi
+if [[ ! "${IMAGE_RETENTION_HOURS:-72}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] IMAGE_RETENTION_HOURS must be a positive whole number." >&2
+    exit 1
+fi
+if [[ ! "${BUILD_CACHE_RETENTION_HOURS:-168}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] BUILD_CACHE_RETENTION_HOURS must be a positive whole number." >&2
+    exit 1
+fi
+
+cleanup_old_releases() {
+    local current_release releases_dir release_name index
+    local -a releases
+
+    current_release="$(realpath "${ROOT_DIR}")"
+    releases_dir="$(dirname "${current_release}")"
+    release_name="$(basename "${current_release}")"
+
+    if [[ "$(basename "${releases_dir}")" != "releases" || ! "${release_name}" =~ ^[0-9]+$ ]]; then
+        echo "[WARN] Release cleanup skipped because ${current_release} is not a numbered release directory."
+        return
+    fi
+
+    mapfile -t releases < <(
+        find "${releases_dir}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+            | awk '/^[0-9]+$/' \
+            | sort -rn
+    )
+
+    for ((index=RELEASE_RETENTION; index<${#releases[@]}; index++)); do
+        if [[ "${releases[index]}" != "${release_name}" ]]; then
+            echo "[CLEANUP] Removing old release ${releases_dir}/${releases[index]}"
+            rm -rf -- "${releases_dir:?}/${releases[index]}"
+        fi
+    done
+}
+
+cleanup_managed_images() {
+    docker image prune --all --force \
+        --filter "label=com.deployment-toolkit.managed=true" \
+        --filter "label=com.deployment-toolkit.project=${COMPOSE_PROJECT_NAME}" \
+        --filter "until=${IMAGE_RETENTION_HOURS:-72}h"
+}
+
+cleanup_build_cache() {
+    if [[ "${PRUNE_BUILD_CACHE:-true}" == "true" ]]; then
+        docker builder prune --force \
+            --filter "until=${BUILD_CACHE_RETENTION_HOURS:-168}h"
+    fi
+}
 
 COMPOSE=(
     docker compose
@@ -42,14 +114,9 @@ case "${ACTION}" in
         ;;
 esac
 
-set -a
-# shellcheck disable=SC1090
-source "${ENV_FILE}"
-set +a
-
-docker image inspect "${GO_IMAGE_REPOSITORY}:${IMAGE_TAG}" \
+docker image inspect "${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}" \
     --format 'Image={{.RepoTags}} SizeBytes={{.Size}}'
-docker image ls "${GO_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+docker image ls "${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}"
 
 if [[ "${ACTION}" == "deploy" ]]; then
     "${COMPOSE[@]}" ps "${SERVICE}"
@@ -64,4 +131,8 @@ if [[ "${ACTION}" == "deploy" ]]; then
     fi
 fi
 
-echo "[DONE] ${ACTION} completed for ${GO_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+cleanup_managed_images
+cleanup_build_cache
+cleanup_old_releases
+
+echo "[DONE] ${ACTION} completed for ${SERVICE}: ${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}"

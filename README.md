@@ -1,107 +1,131 @@
-# Deployment Toolkit — Go SSH Pilot
+# Deployment Toolkit — Go and React SSH deployment
 
-This repository provides one parameterized Jenkins job for building or deploying a Go service on an internal Dev/QC Docker server over SSH. The application branch defaults to `develop` and the first target environment is `dev`.
+This repository provides one parameterized Jenkins Pipeline for building or deploying a Go backend or React frontend on an internal Dev/QC Docker server over SSH. Application repositories remain separate from the deployment logic.
 
 ```text
-Jenkins agent
-  -> checkout toolkit and Go source
-  -> run Go tests
-  -> rsync a unique release directory over SSH
-  -> run Docker Compose on the local server
-  -> verify the image and container over SSH
+Jenkins parameters
+  -> select Go or React configuration
+  -> checkout toolkit and selected application repository
+  -> run technology-specific validation
+  -> rsync an isolated release over SSH
+  -> build or deploy the selected Compose service
+  -> verify the image and container
 ```
 
-## 1. Application contract
+## 1. Application contracts
+
+### Go
 
 The Go repository must:
 
-- contain `go.mod` at its root (`go.sum` is used when present);
+- contain `go.mod` at its root (`go.sum` is optional);
 - compile with `CGO_ENABLED=0`;
-- expose one buildable package, defaulting to `./cmd/server`;
-- listen on the port supplied through the `PORT` environment variable, default `8080`.
+- expose one buildable package, configured with `GO_BUILD_PACKAGE`;
+- use the `PORT` environment variable if it is a web service.
 
-If the application uses a different main package, set `GO_BUILD_PACKAGE` in Jenkins.
+The final image uses a distroless non-root runtime. A CLI application can be verified through its container process and logs instead of HTTP.
+CLI deployments default to `GO_RESTART_POLICY=no`, so an infinite-loop utility does not automatically return after Docker or the host restarts.
 
-## 2. Verify Docker manually first
+### React
 
-Copy the example environment file and replace the source paths with absolute paths:
+The React repository must:
+
+- contain `package.json` and `package-lock.json` at its root;
+- support `npm run lint` for Jenkins validation;
+- support `npm run build`;
+- produce static production files in `dist/`.
+
+The build stage uses Node.js. The final image contains only Nginx and the generated `dist/` files.
+`NODE_BUILD_MEMORY_MB` caps the Node.js heap during linting and production builds.
+
+## 2. Resource and storage safeguards
+
+Every deployed service has explicit CPU, memory and process limits. Docker JSON logs rotate at `10m` with three files by default, preventing an application that prints continuously from filling the server disk.
+
+After a successful build or deployment, the toolkit:
+
+- retains only the newest `RELEASE_RETENTION` numbered release directories, default `5`;
+- removes unused toolkit-managed images older than `IMAGE_RETENTION_HOURS`, default `72`;
+- removes unused Docker build cache older than `BUILD_CACHE_RETENTION_HOURS`, default `168`, when `PRUNE_BUILD_CACHE=true`;
+- lets Jenkins retain 20 build records and 10 artifact sets.
+
+Image cleanup is restricted through toolkit and project labels. Build-cache cleanup is Docker-host-wide but only removes unused cache older than the configured threshold; disable it on a shared builder by setting `PRUNE_BUILD_CACHE=false`.
+
+These settings apply when Compose creates or recreates a container. They do not retroactively limit an already-running container created by an earlier version of the toolkit.
+
+## 3. Service configuration
+
+The reusable service map is defined in `Jenkinsfile` by `serviceConfiguration`. It maps each Jenkins `SERVICE` value to:
+
+- its repository URL parameter;
+- image repository parameter;
+- host and container port parameters;
+- isolated source directory.
+
+The shared Pipeline stages do not need to be copied for each technology. Ruby and multi-service execution will be added after both Go and React paths are verified.
+
+## 4. Manual Docker verification
+
+Copy the example environment file and replace its absolute source and Dockerfile paths:
 
 ```bash
 cp .env.example .env
 docker compose config --quiet
 docker compose build go-backend
-docker compose up -d go-backend
-docker compose ps
-docker image ls local/go-backend
+docker compose build react-frontend
 ```
 
-Stop the manual deployment with:
+To deploy one service manually:
+
+```bash
+docker compose up --build -d react-frontend
+docker compose ps
+```
+
+Remove the manual deployment with:
 
 ```bash
 docker compose down
 ```
 
-## 3. Prepare the local Docker server
+## 5. Local Docker server requirements
 
 The internal Dev/QC server needs:
 
-- Linux with `bash`;
+- Linux and Bash;
 - Docker Engine and Docker Compose v2;
-- an SSH user that can run Docker;
+- an SSH deployment user with Docker access;
 - `rsync`;
 - a writable toolkit base directory.
 
-Example server preparation, performed by an administrator:
+Example preparation by an administrator:
 
 ```bash
 sudo mkdir -p /opt/deployment-toolkit
-sudo chown ubuntu:ubuntu /opt/deployment-toolkit
+sudo chown DEPLOYMENT_USER:DEPLOYMENT_USER /opt/deployment-toolkit
 docker version
 docker compose version
 rsync --version
 ```
 
-Replace `ubuntu` with the real deployment account. Giving an account Docker access grants strong control over that server, so use a dedicated Dev/QC host and restrict SSH/Jenkins permissions.
+Docker access grants strong control over the server. Use a dedicated Dev/QC host and restrict the Jenkins credentials.
 
-## 4. Prepare Jenkins
+## 6. Jenkins requirements and credentials
 
-The Jenkins agent labelled `docker` needs:
+The Jenkins agent labelled `docker` needs Git, Docker, Docker Compose, SSH and rsync. It also needs the **SSH Agent** and **Credentials Binding** plugins.
 
-- Git;
-- Docker Engine;
-- Docker Compose v2 (`docker compose`);
-- an SSH client and `rsync`;
-- permission for the Jenkins agent account to access the Docker daemon;
-- network access to Git repositories and the local server's SSH port;
-- the **SSH Agent** and **Credentials Binding** Jenkins plugins.
+For private application repositories, configure a GitHub SSH credential and supply its Jenkins credential ID through `GIT_CREDENTIALS_ID`. Never store a private key or token in this repository.
 
-Docker is used on the agent to test the Go source. The application image is built on the remote local server.
-
-For a private Git repository, create a Jenkins credential and remember its credential ID. Do not store passwords, private keys, or tokens in this repository.
-
-### SSH authentication credential
-
-In **Manage Jenkins → Credentials → System → Global credentials**, add:
+Create the server authentication credential under **Manage Jenkins → Credentials → System → Global credentials**:
 
 ```text
 Kind: SSH Username with private key
 ID: local-server-ssh
-Username: ubuntu (or the real deployment user)
-Private key: the dedicated deployment private key
+Username: the real deployment user
+Private key: dedicated server deployment key
 ```
 
-Install the matching public key in the deployment user's `~/.ssh/authorized_keys` on the local server.
-
-### Verified host-key credential
-
-On a trusted administrator machine, obtain the server host key:
-
-```bash
-ssh-keyscan -H YOUR_LOCAL_SERVER_HOST > local-server-known_hosts
-ssh-keygen -lf local-server-known_hosts
-```
-
-Verify the displayed fingerprint with the server administrator before using it. Upload the file to Jenkins as:
+Upload the verified SSH host-key file as:
 
 ```text
 Kind: Secret file
@@ -109,82 +133,101 @@ ID: local-server-known-hosts
 File: local-server-known_hosts
 ```
 
-The pipeline uses strict host-key checking. It does not automatically trust an unknown server.
+The Pipeline enforces strict host-key checking.
 
-## 5. Create the Jenkins job
+## 7. Jenkins job configuration
 
-1. Push this toolkit directory to its own Git repository.
-2. In Jenkins, select **New Item**.
-3. Choose **Pipeline**.
-4. Under **Pipeline**, choose **Pipeline script from SCM**.
-5. Select Git and enter the Deployment Toolkit repository URL.
-6. Set the script path to `Jenkinsfile`.
-7. Save, then run the job once so Jenkins loads the parameters.
+Create one **Pipeline script from SCM** job pointing to this toolkit repository and use `Jenkinsfile` as the script path.
 
-In **Manage Jenkins → Nodes**, ensure the machine that has Docker is available as an agent with the label `docker`. The pipeline deliberately does not run on an arbitrary Jenkins node.
-
-For this feature branch test, set the toolkit SCM branch to:
+During Phase 3 testing, configure its toolkit branch as:
 
 ```text
-*/feature/ssh-local-server-deploy
+*/feature/react-service-deploy
 ```
 
-After review and merge, change it back to `*/develop`.
+After review and merge, switch the job back to:
 
-## 6. Run the Go SSH pilot
+```text
+*/develop
+```
 
-Use these first-run values:
+Run the job once after changing the toolkit branch so Jenkins loads the updated parameters.
 
-| Parameter | Initial value |
+## 8. Go build or deployment
+
+Use values matching the Go application:
+
+| Parameter | Example |
 |---|---|
 | `SERVICE` | `go-backend` |
-| `ACTION` | `build` |
-| `BRANCH` | `develop` |
-| `ENVIRONMENT` | `dev` |
-| `PROJECT_ID` | `calendar` or another lowercase project slug |
-| `GO_REPO_URL` | URL of the Go repository |
-| `GIT_CREDENTIALS_ID` | Jenkins credential ID, or blank for a public repository |
-| `GO_BUILD_PACKAGE` | `./cmd/server`, adjusted to the real project |
-| `GO_VERSION` | Version compatible with the application's `go.mod` |
-| `IMAGE_REPOSITORY` | `local/go-backend` |
-| `HOST_PORT` | An unused port on the local Docker server, such as `8080` |
-| `CONTAINER_PORT` | The application's listening port, such as `8080` |
-| `LOCAL_SERVER_HOST` | Internal Dev/QC server hostname or IPv4 address |
-| `LOCAL_SERVER_USER` | `ubuntu` or the real SSH deployment user |
+| `ACTION` | `build`, then `deploy` |
+| `PROJECT_ID` | `calendar` |
+| `GO_REPO_URL` | Go repository SSH URL |
+| `GO_REPO_BRANCH` | `develop` |
+| `GIT_CREDENTIALS_ID` | GitHub credential ID |
+| `GO_BUILD_PACKAGE` | `.` or `./cmd/server` |
+| `GO_VERSION` | Version compatible with `go.mod` |
+| `GO_IMAGE_REPOSITORY` | `local/calendar` |
+| `GO_HOST_PORT` | `8081` |
+| `GO_CONTAINER_PORT` | `8080` |
+| `GO_RESTART_POLICY` | `no` for the Calendar CLI |
+| `GO_MEMORY_LIMIT` | `256m` |
+| `GO_CPU_LIMIT` | `0.50` |
+
+The unused React parameters may retain their defaults.
+
+## 9. React build or deployment
+
+Use these initial values for the employee directory:
+
+| Parameter | Value |
+|---|---|
+| `SERVICE` | `react-frontend` |
+| `ACTION` | `build`, then `deploy` |
+| `PROJECT_ID` | `employee-directory` |
+| `REACT_REPO_URL` | `git@github.com:KillianNguyenn06/employee-directory.git` |
+| `REACT_REPO_BRANCH` | `develop` |
+| `GIT_CREDENTIALS_ID` | Existing GitHub credential ID |
+| `NODE_VERSION` | `22` |
+| `NODE_BUILD_MEMORY_MB` | `768` |
+| `REACT_IMAGE_REPOSITORY` | `local/employee-directory` |
+| `REACT_HOST_PORT` | `3000` |
+| `REACT_CONTAINER_PORT` | `80` |
+| `REACT_RESTART_POLICY` | `unless-stopped` |
+| `REACT_MEMORY_LIMIT` | `256m` |
+| `REACT_CPU_LIMIT` | `0.50` |
+| `LOCAL_SERVER_HOST` | Internal Dev/QC server address |
+| `LOCAL_SERVER_USER` | Real SSH deployment user |
 | `LOCAL_SERVER_BASE_DIR` | `/opt/deployment-toolkit` |
 | `SSH_CREDENTIALS_ID` | `local-server-ssh` |
 | `SSH_KNOWN_HOSTS_CREDENTIALS_ID` | `local-server-known-hosts` |
 
-Run `ACTION=build` first. When it succeeds, run the same parameters with `ACTION=deploy`.
+After `ACTION=deploy`, verify the React service from the Ubuntu server:
 
-Each build uses an isolated remote release directory:
+```bash
+docker compose ps
+curl http://localhost:3000/
+```
+
+Unlike the CLI Go pilot, React is served over HTTP, so `curl` is a valid runtime check.
+The React container port remains `80` because that is the port used by the production Nginx runtime; change only the host port when avoiding a server-side conflict.
+
+## 10. Releases and IR evidence
+
+Every build creates an isolated remote directory:
 
 ```text
 /opt/deployment-toolkit/projects/PROJECT_ID/releases/BUILD_NUMBER/
 ```
 
-`ACTION=build` builds the image on the local server without starting it. `ACTION=deploy` builds the image and starts or updates the Compose service.
+The Jenkins console records source checkout, validation, SSH transfer, Docker build, container state, image tag and image size. Record a manual baseline before claiming a percentage improvement, using the same service, commit, host and network conditions.
 
-## 7. Evidence for the IR
+## 11. Next phase
 
-The pipeline console records:
+After Go regression testing and React build/deployment succeed:
 
-- toolkit and application checkout;
-- `go test ./...` results;
-- transfer of the release to the local server;
-- the remote Docker/Compose build;
-- the remote container state;
-- the final image tag and size in bytes;
-- `docker image ls` output.
-
-Record a manual deployment baseline before claiming a percentage improvement. Compare the same service, host class, network conditions, and application commit.
-
-## 8. Next phase
-
-After the Go pilot is stable:
-
-1. add React and Ruby Dockerfiles;
-2. add their services to `compose.yaml`;
-3. extend `SERVICE` to `go-backend`, `react-frontend`, `ruby-service`, and `all`;
-4. place repository/build settings in a centralized service configuration;
-5. add health endpoints and rollback rules before deploying beyond Dev.
+1. add the Ruby service configuration and Dockerfile;
+2. add `SERVICE=all`;
+3. check out multiple repositories and build independent services in parallel;
+4. add health checks, retention/cleanup and rollback behavior;
+5. finalize measurements and the Wiki guide.
