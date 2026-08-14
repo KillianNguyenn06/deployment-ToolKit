@@ -420,7 +420,7 @@ pipeline {
                 script {
                     writeFile file: '.env.remote', text: """\
 SERVICE=${params.SERVICE}
-SELECTED_SERVICES=${env.SELECTED_SERVICES}
+SELECTED_SERVICES="${env.SELECTED_SERVICES}"
 GO_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/go-backend
 GO_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/go.Dockerfile
 GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}
