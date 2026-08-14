@@ -1,5 +1,6 @@
 .env
 .env.remote
+.commit-*
 sources/
 *.log
 .DS_Store

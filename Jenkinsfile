@@ -10,8 +10,8 @@ pipeline {
     parameters {
         choice(
             name: 'SERVICE',
-            choices: ['go-backend', 'react-frontend', 'ruby-service'],
-            description: 'Application service to build or deploy.'
+            choices: ['go-backend', 'react-frontend', 'ruby-service', 'all'],
+            description: 'Application service to build or deploy. all processes Go, React and Ruby in one run.'
         )
         choice(
             name: 'ACTION',
@@ -254,16 +254,9 @@ pipeline {
         stage('Validate parameters') {
             steps {
                 script {
-                    def service = serviceConfiguration(params.SERVICE)
-                    env.APP_BRANCH = params[service.branchParameter].trim() ?: 'develop'
-                    env.APP_REPO_URL = params[service.repoParameter].trim()
-                    env.SOURCE_SUBDIR = service.sourceSubdir
-                    env.SOURCE_DIR = "${env.WORKSPACE}/sources/${service.sourceSubdir}"
-                    env.TARGET_IMAGE_REPOSITORY = params[service.imageParameter].trim()
+                    def selectedServices = selectedServiceNames(params.SERVICE)
+                    env.SELECTED_SERVICES = selectedServices.join(' ')
 
-                    if (!env.APP_REPO_URL) {
-                        error("${service.repoParameter} is required when SERVICE=${params.SERVICE}.")
-                    }
                     if (!(params.PROJECT_ID ==~ /[a-z0-9][a-z0-9-]{1,62}/)) {
                         error('PROJECT_ID must be 2-63 lowercase letters, numbers, or hyphens.')
                     }
@@ -279,43 +272,62 @@ pipeline {
                     if (!params.SSH_CREDENTIALS_ID.trim() || !params.SSH_KNOWN_HOSTS_CREDENTIALS_ID.trim()) {
                         error('Both SSH credential IDs are required.')
                     }
-                    if (!(env.APP_BRANCH ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error("${service.branchParameter} contains unsupported characters.")
-                    }
-                    if (!(params.GO_BUILD_PACKAGE ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error('GO_BUILD_PACKAGE contains unsupported characters.')
-                    }
-                    if (!(params.RUBY_TEST_FILE ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error('RUBY_TEST_FILE contains unsupported characters.')
-                    }
-                    ['GO_IMAGE_REPOSITORY', 'REACT_IMAGE_REPOSITORY', 'RUBY_IMAGE_REPOSITORY'].each { parameterName ->
-                        if (!(params[parameterName] ==~ /[A-Za-z0-9._\/-]+/)) {
-                            error("${parameterName} contains unsupported characters.")
+
+                    def usedHostPorts = [:]
+                    selectedServices.each { serviceName ->
+                        def service = serviceConfiguration(serviceName)
+                        def repoUrl = params[service.repoParameter].trim()
+                        def branch = params[service.branchParameter].trim() ?: 'develop'
+
+                        if (!repoUrl) {
+                            error("${service.repoParameter} is required when SERVICE=${params.SERVICE}.")
                         }
-                    }
-                    validateVersion(params.GO_VERSION, 'GO_VERSION')
-                    validateVersion(params.NODE_VERSION, 'NODE_VERSION')
-                    validateVersion(params.RUBY_VERSION, 'RUBY_VERSION')
-                    ['GO_HOST_PORT', 'GO_CONTAINER_PORT', 'REACT_HOST_PORT', 'REACT_CONTAINER_PORT', 'RUBY_HOST_PORT', 'RUBY_CONTAINER_PORT'].each { parameterName ->
-                        validatePort(params[parameterName], parameterName)
-                    }
-                    if (params.REACT_CONTAINER_PORT != '80') {
-                        error('REACT_CONTAINER_PORT must be 80 because the production Nginx image listens on port 80.')
-                    }
-                    if (params.RUBY_CONTAINER_PORT != '9292') {
-                        error('RUBY_CONTAINER_PORT must be 9292 because the production Puma image and health check use port 9292.')
-                    }
-                    ['GO_MEMORY_LIMIT', 'REACT_MEMORY_LIMIT', 'RUBY_MEMORY_LIMIT'].each { parameterName ->
-                        if (!(params[parameterName] ==~ /[1-9][0-9]*[kKmMgG]/)) {
-                            error("${parameterName} must be a positive Docker memory value such as 256m or 1g.")
+                        if (!(branch ==~ /[A-Za-z0-9._\/-]+/)) {
+                            error("${service.branchParameter} contains unsupported characters.")
                         }
-                    }
-                    ['GO_CPU_LIMIT', 'REACT_CPU_LIMIT', 'RUBY_CPU_LIMIT'].each { parameterName ->
-                        def cpuValue = params[parameterName]
+                        if (!(params[service.imageParameter] ==~ /[A-Za-z0-9._\/-]+/)) {
+                            error("${service.imageParameter} contains unsupported characters.")
+                        }
+
+                        validatePort(params[service.hostPortParameter], service.hostPortParameter)
+                        validatePort(params[service.containerPortParameter], service.containerPortParameter)
+                        def hostPort = params[service.hostPortParameter]
+                        if (usedHostPorts.containsKey(hostPort)) {
+                            error("Host port ${hostPort} is assigned to both ${usedHostPorts[hostPort]} and ${serviceName}.")
+                        }
+                        usedHostPorts[hostPort] = serviceName
+
+                        if (!(params[service.memoryParameter] ==~ /[1-9][0-9]*[kKmMgG]/)) {
+                            error("${service.memoryParameter} must be a positive Docker memory value such as 256m or 1g.")
+                        }
+                        def cpuValue = params[service.cpuParameter]
                         def isNumeric = cpuValue ==~ /[0-9]+(\.[0-9]+)?/
                         def isZero = cpuValue ==~ /0+(\.0+)?/
                         if (!isNumeric || isZero) {
-                            error("${parameterName} must be a positive CPU number such as 0.50 or 1.")
+                            error("${service.cpuParameter} must be a positive CPU number such as 0.50 or 1.")
+                        }
+                    }
+
+                    if (selectedServices.contains('go-backend')) {
+                        if (!(params.GO_BUILD_PACKAGE ==~ /[A-Za-z0-9._\/-]+/)) {
+                            error('GO_BUILD_PACKAGE contains unsupported characters.')
+                        }
+                        validateVersion(params.GO_VERSION, 'GO_VERSION')
+                    }
+                    if (selectedServices.contains('react-frontend')) {
+                        validateVersion(params.NODE_VERSION, 'NODE_VERSION')
+                        validatePositiveInteger(params.NODE_BUILD_MEMORY_MB, 'NODE_BUILD_MEMORY_MB', 8192)
+                        if (params.REACT_CONTAINER_PORT != '80') {
+                            error('REACT_CONTAINER_PORT must be 80 because the production Nginx image listens on port 80.')
+                        }
+                    }
+                    if (selectedServices.contains('ruby-service')) {
+                        if (!(params.RUBY_TEST_FILE ==~ /[A-Za-z0-9._\/-]+/)) {
+                            error('RUBY_TEST_FILE contains unsupported characters.')
+                        }
+                        validateVersion(params.RUBY_VERSION, 'RUBY_VERSION')
+                        if (params.RUBY_CONTAINER_PORT != '9292') {
+                            error('RUBY_CONTAINER_PORT must be 9292 because the production Puma image and health check use port 9292.')
                         }
                     }
                     if (!(params.DOCKER_LOG_MAX_SIZE ==~ /[1-9][0-9]*[kKmMgG]/)) {
@@ -325,9 +337,9 @@ pipeline {
                     validatePositiveInteger(params.RELEASE_RETENTION, 'RELEASE_RETENTION', 100)
                     validatePositiveInteger(params.IMAGE_RETENTION_HOURS, 'IMAGE_RETENTION_HOURS', 8760)
                     validatePositiveInteger(params.BUILD_CACHE_RETENTION_HOURS, 'BUILD_CACHE_RETENTION_HOURS', 8760)
-                    validatePositiveInteger(params.NODE_BUILD_MEMORY_MB, 'NODE_BUILD_MEMORY_MB', 8192)
 
                     env.REMOTE_RELEASE_DIR = "${params.LOCAL_SERVER_BASE_DIR}/projects/${params.PROJECT_ID}/releases/${env.BUILD_NUMBER}"
+                    echo "Selected services: ${env.SELECTED_SERVICES}"
                 }
 
                 sh '''
@@ -346,83 +358,59 @@ pipeline {
             }
         }
 
-        stage('Checkout application') {
+        stage('Checkout applications') {
             steps {
-                dir(env.SOURCE_DIR) {
-                    deleteDir()
-                    script {
-                        def remote = [url: env.APP_REPO_URL]
-                        if (params.GIT_CREDENTIALS_ID.trim()) {
-                            remote.credentialsId = params.GIT_CREDENTIALS_ID.trim()
+                script {
+                    dir("${env.WORKSPACE}/sources") {
+                        deleteDir()
+                    }
+
+                    def checkoutBranches = [:]
+                    selectedServiceNames(params.SERVICE).each { selectedName ->
+                        def serviceName = selectedName
+                        def service = serviceConfiguration(serviceName)
+                        checkoutBranches["Checkout ${serviceName}"] = {
+                            checkoutApplication(serviceName, service)
                         }
+                    }
+                    parallel checkoutBranches
 
-                        checkout([
-                            $class: 'GitSCM',
-                            branches: [[name: "*/${env.APP_BRANCH}"]],
-                            userRemoteConfigs: [remote]
-                        ])
-
-                        env.GIT_COMMIT_SHORT = sh(
-                            script: 'git rev-parse --short=12 HEAD',
-                            returnStdout: true
-                        ).trim()
-                        env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
+                    selectedServiceNames(params.SERVICE).each { serviceName ->
+                        def commit = readFile(file: ".commit-${serviceName}").trim()
+                        setServiceImageTag(serviceName, "${env.BUILD_NUMBER}-${commit}")
                     }
                 }
             }
         }
 
-        stage('Test application') {
+        stage('Test applications') {
             when {
                 expression { params.RUN_TESTS }
             }
             steps {
                 script {
-                    if (params.SERVICE == 'go-backend') {
-                        sh '''
-                            set -eu
-                            docker run --rm \
-                                --memory=1g \
-                                --cpus=1.0 \
-                                --pids-limit=256 \
-                                -v "$SOURCE_DIR:/src:ro" \
-                                -w /src \
-                                "golang:$GO_VERSION-bookworm" \
-                                go test ./...
-                        '''
-                    } else if (params.SERVICE == 'react-frontend') {
-                        sh '''
-                            set -eu
-                            docker run --rm \
-                                --memory=1g \
-                                --cpus=1.0 \
-                                --pids-limit=256 \
-                                -e "NODE_OPTIONS=--max-old-space-size=$NODE_BUILD_MEMORY_MB" \
-                                -v "$SOURCE_DIR:/source:ro" \
-                                "node:$NODE_VERSION-bookworm-slim" \
-                                sh -c 'cp -a /source/. /tmp/app && cd /tmp/app && npm ci && npm run lint && npm run build'
-                        '''
-                    } else if (params.SERVICE == 'ruby-service') {
-                        sh '''
-                            set -eu
-                            docker run --rm \
-                                --memory=1g \
-                                --cpus=1.0 \
-                                --pids-limit=256 \
-                                -v "$SOURCE_DIR:/app:ro" \
-                                -w /app \
-                                "ruby:$RUBY_VERSION-slim" \
-                                ruby -Itest "$RUBY_TEST_FILE"
-                        '''
+                    def testBranches = [:]
+                    selectedServiceNames(params.SERVICE).each { selectedName ->
+                        def serviceName = selectedName
+                        testBranches["Test ${serviceName}"] = {
+                            testApplication(serviceName)
+                        }
                     }
+                    parallel testBranches
                 }
             }
         }
 
         stage('Validate Compose') {
             steps {
-                withEnv(composeEnvironment()) {
-                    sh 'docker compose --file "$COMPOSE_FILE" config --quiet'
+                script {
+                    withEnv(composeEnvironment()) {
+                        def profileArguments = selectedServiceNames(params.SERVICE)
+                            .collect { serviceConfiguration(it).profile }
+                            .collect { "--profile ${it}" }
+                            .join(' ')
+                        sh "docker compose --file '${env.COMPOSE_FILE}' ${profileArguments} config --quiet"
+                    }
                 }
             }
         }
@@ -432,11 +420,13 @@ pipeline {
                 script {
                     writeFile file: '.env.remote', text: """\
 SERVICE=${params.SERVICE}
+SELECTED_SERVICES=${env.SELECTED_SERVICES}
 GO_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/go-backend
 GO_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/go.Dockerfile
 GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}
 GO_VERSION=${params.GO_VERSION}
 GO_IMAGE_REPOSITORY=${params.GO_IMAGE_REPOSITORY}
+GO_IMAGE_TAG=${env.GO_IMAGE_TAG ?: 'not-selected'}
 GO_HOST_PORT=${params.GO_HOST_PORT}
 GO_CONTAINER_PORT=${params.GO_CONTAINER_PORT}
 GO_RESTART_POLICY=${params.GO_RESTART_POLICY}
@@ -447,6 +437,7 @@ REACT_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/react.Dockerfile
 NODE_VERSION=${params.NODE_VERSION}
 NODE_BUILD_MEMORY_MB=${params.NODE_BUILD_MEMORY_MB}
 REACT_IMAGE_REPOSITORY=${params.REACT_IMAGE_REPOSITORY}
+REACT_IMAGE_TAG=${env.REACT_IMAGE_TAG ?: 'not-selected'}
 REACT_HOST_PORT=${params.REACT_HOST_PORT}
 REACT_CONTAINER_PORT=${params.REACT_CONTAINER_PORT}
 REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}
@@ -456,6 +447,7 @@ RUBY_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/ruby-service
 RUBY_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/ruby.Dockerfile
 RUBY_VERSION=${params.RUBY_VERSION}
 RUBY_IMAGE_REPOSITORY=${params.RUBY_IMAGE_REPOSITORY}
+RUBY_IMAGE_TAG=${env.RUBY_IMAGE_TAG ?: 'not-selected'}
 RUBY_HOST_PORT=${params.RUBY_HOST_PORT}
 RUBY_CONTAINER_PORT=${params.RUBY_CONTAINER_PORT}
 RUBY_RESTART_POLICY=${params.RUBY_RESTART_POLICY}
@@ -467,8 +459,6 @@ RELEASE_RETENTION=${params.RELEASE_RETENTION}
 IMAGE_RETENTION_HOURS=${params.IMAGE_RETENTION_HOURS}
 PRUNE_BUILD_CACHE=${params.PRUNE_BUILD_CACHE}
 BUILD_CACHE_RETENTION_HOURS=${params.BUILD_CACHE_RETENTION_HOURS}
-TARGET_IMAGE_REPOSITORY=${env.TARGET_IMAGE_REPOSITORY}
-IMAGE_TAG=${env.IMAGE_TAG}
 APP_ENV=${params.ENVIRONMENT}
 COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
 """
@@ -492,30 +482,58 @@ COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}
                             -o StrictHostKeyChecking=yes \
                             -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
                             "$target" \
-                            "command -v rsync >/dev/null && docker version && docker compose version && mkdir -p '$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR'"
+                            "command -v rsync >/dev/null && docker version && docker compose version && mkdir -p '$REMOTE_RELEASE_DIR/sources'"
 
                         rsync -az \
                             --exclude='.git/' \
                             --exclude='.env' \
                             --exclude='.env.remote' \
+                            --exclude='.commit-*' \
                             --exclude='sources/' \
                             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
                             "$WORKSPACE/" \
                             "$target:$REMOTE_RELEASE_DIR/"
 
                         rsync -az \
-                            --exclude='.git/' \
-                            --exclude='node_modules/' \
-                            --exclude='dist/' \
-                            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
-                            "$SOURCE_DIR/" \
-                            "$target:$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR/"
-
-                        rsync -az \
                             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
                             "$WORKSPACE/.env.remote" \
                             "$target:$REMOTE_RELEASE_DIR/.env"
                         '''
+
+                        script {
+                            def syncBranches = [:]
+                            selectedServiceNames(params.SERVICE).each { selectedName ->
+                                def serviceName = selectedName
+                                def service = serviceConfiguration(serviceName)
+                                syncBranches["Sync ${serviceName}"] = {
+                                    withEnv([
+                                        "SOURCE_DIR=${env.WORKSPACE}/sources/${service.sourceSubdir}",
+                                        "SOURCE_SUBDIR=${service.sourceSubdir}"
+                                    ]) {
+                                        sh '''
+                                            set -eu
+                                            target="$LOCAL_SERVER_USER@$LOCAL_SERVER_HOST"
+
+                                            ssh \
+                                                -o BatchMode=yes \
+                                                -o StrictHostKeyChecking=yes \
+                                                -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+                                                "$target" \
+                                                "mkdir -p '$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR'"
+
+                                            rsync -az \
+                                                --exclude='.git/' \
+                                                --exclude='node_modules/' \
+                                                --exclude='dist/' \
+                                                -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+                                                "$SOURCE_DIR/" \
+                                                "$target:$REMOTE_RELEASE_DIR/sources/$SOURCE_SUBDIR/"
+                                        '''
+                                    }
+                                }
+                            }
+                            parallel syncBranches
+                        }
                     }
                 }
             }
@@ -561,19 +579,34 @@ def serviceConfiguration(String serviceName) {
             repoParameter: 'GO_REPO_URL',
             branchParameter: 'GO_REPO_BRANCH',
             imageParameter: 'GO_IMAGE_REPOSITORY',
-            sourceSubdir: 'go-backend'
+            hostPortParameter: 'GO_HOST_PORT',
+            containerPortParameter: 'GO_CONTAINER_PORT',
+            memoryParameter: 'GO_MEMORY_LIMIT',
+            cpuParameter: 'GO_CPU_LIMIT',
+            sourceSubdir: 'go-backend',
+            profile: 'go'
         ],
         'react-frontend': [
             repoParameter: 'REACT_REPO_URL',
             branchParameter: 'REACT_REPO_BRANCH',
             imageParameter: 'REACT_IMAGE_REPOSITORY',
-            sourceSubdir: 'react-frontend'
+            hostPortParameter: 'REACT_HOST_PORT',
+            containerPortParameter: 'REACT_CONTAINER_PORT',
+            memoryParameter: 'REACT_MEMORY_LIMIT',
+            cpuParameter: 'REACT_CPU_LIMIT',
+            sourceSubdir: 'react-frontend',
+            profile: 'react'
         ],
         'ruby-service': [
             repoParameter: 'RUBY_REPO_URL',
             branchParameter: 'RUBY_REPO_BRANCH',
             imageParameter: 'RUBY_IMAGE_REPOSITORY',
-            sourceSubdir: 'ruby-service'
+            hostPortParameter: 'RUBY_HOST_PORT',
+            containerPortParameter: 'RUBY_CONTAINER_PORT',
+            memoryParameter: 'RUBY_MEMORY_LIMIT',
+            cpuParameter: 'RUBY_CPU_LIMIT',
+            sourceSubdir: 'ruby-service',
+            profile: 'ruby'
         ]
     ]
 
@@ -581,6 +614,94 @@ def serviceConfiguration(String serviceName) {
         error("Unsupported SERVICE: ${serviceName}")
     }
     return services[serviceName]
+}
+
+def selectedServiceNames(String selection) {
+    if (selection == 'all') {
+        return ['go-backend', 'react-frontend', 'ruby-service']
+    }
+    serviceConfiguration(selection)
+    return [selection]
+}
+
+def checkoutApplication(String serviceName, Map service) {
+    def repoUrl = params[service.repoParameter].trim()
+    def branch = params[service.branchParameter].trim() ?: 'develop'
+    def remote = [url: repoUrl]
+    if (params.GIT_CREDENTIALS_ID.trim()) {
+        remote.credentialsId = params.GIT_CREDENTIALS_ID.trim()
+    }
+
+    dir("${env.WORKSPACE}/sources/${service.sourceSubdir}") {
+        deleteDir()
+        checkout([
+            $class: 'GitSCM',
+            branches: [[name: "*/${branch}"]],
+            userRemoteConfigs: [remote]
+        ])
+        def commit = sh(
+            script: 'git rev-parse --short=12 HEAD',
+            returnStdout: true
+        ).trim()
+        dir("${env.WORKSPACE}") {
+            writeFile file: ".commit-${serviceName}", text: "${commit}\n"
+        }
+    }
+}
+
+def testApplication(String serviceName) {
+    def service = serviceConfiguration(serviceName)
+    withEnv(["SOURCE_DIR=${env.WORKSPACE}/sources/${service.sourceSubdir}"]) {
+        if (serviceName == 'go-backend') {
+            sh '''
+                set -eu
+                docker run --rm \
+                    --memory=1g \
+                    --cpus=1.0 \
+                    --pids-limit=256 \
+                    -v "$SOURCE_DIR:/src:ro" \
+                    -w /src \
+                    "golang:$GO_VERSION-bookworm" \
+                    go test ./...
+            '''
+        } else if (serviceName == 'react-frontend') {
+            sh '''
+                set -eu
+                docker run --rm \
+                    --memory=1g \
+                    --cpus=1.0 \
+                    --pids-limit=256 \
+                    -e "NODE_OPTIONS=--max-old-space-size=$NODE_BUILD_MEMORY_MB" \
+                    -v "$SOURCE_DIR:/source:ro" \
+                    "node:$NODE_VERSION-bookworm-slim" \
+                    sh -c 'cp -a /source/. /tmp/app && cd /tmp/app && npm ci && npm run lint && npm run build'
+            '''
+        } else if (serviceName == 'ruby-service') {
+            sh '''
+                set -eu
+                docker run --rm \
+                    --memory=1g \
+                    --cpus=1.0 \
+                    --pids-limit=256 \
+                    -v "$SOURCE_DIR:/app:ro" \
+                    -w /app \
+                    "ruby:$RUBY_VERSION-slim" \
+                    ruby -Itest "$RUBY_TEST_FILE"
+            '''
+        }
+    }
+}
+
+def setServiceImageTag(String serviceName, String imageTag) {
+    if (serviceName == 'go-backend') {
+        env.GO_IMAGE_TAG = imageTag
+    } else if (serviceName == 'react-frontend') {
+        env.REACT_IMAGE_TAG = imageTag
+    } else if (serviceName == 'ruby-service') {
+        env.RUBY_IMAGE_TAG = imageTag
+    } else {
+        error("Unsupported SERVICE: ${serviceName}")
+    }
 }
 
 def validateVersion(String value, String parameterName) {
@@ -611,12 +732,14 @@ def validatePositiveInteger(String value, String parameterName, Integer maximum)
 def composeEnvironment() {
     return [
         "SERVICE=${params.SERVICE}",
+        "SELECTED_SERVICES=${env.SELECTED_SERVICES}",
         "APP_ENV=${params.ENVIRONMENT}",
         "GO_SOURCE_DIR=${env.WORKSPACE}/sources/go-backend",
         "GO_DOCKERFILE=${env.WORKSPACE}/docker/go.Dockerfile",
         "GO_BUILD_PACKAGE=${params.GO_BUILD_PACKAGE}",
         "GO_VERSION=${params.GO_VERSION}",
         "GO_IMAGE_REPOSITORY=${params.GO_IMAGE_REPOSITORY}",
+        "GO_IMAGE_TAG=${env.GO_IMAGE_TAG ?: 'not-selected'}",
         "GO_HOST_PORT=${params.GO_HOST_PORT}",
         "GO_CONTAINER_PORT=${params.GO_CONTAINER_PORT}",
         "GO_RESTART_POLICY=${params.GO_RESTART_POLICY}",
@@ -627,6 +750,7 @@ def composeEnvironment() {
         "NODE_VERSION=${params.NODE_VERSION}",
         "NODE_BUILD_MEMORY_MB=${params.NODE_BUILD_MEMORY_MB}",
         "REACT_IMAGE_REPOSITORY=${params.REACT_IMAGE_REPOSITORY}",
+        "REACT_IMAGE_TAG=${env.REACT_IMAGE_TAG ?: 'not-selected'}",
         "REACT_HOST_PORT=${params.REACT_HOST_PORT}",
         "REACT_CONTAINER_PORT=${params.REACT_CONTAINER_PORT}",
         "REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}",
@@ -636,6 +760,7 @@ def composeEnvironment() {
         "RUBY_DOCKERFILE=${env.WORKSPACE}/docker/ruby.Dockerfile",
         "RUBY_VERSION=${params.RUBY_VERSION}",
         "RUBY_IMAGE_REPOSITORY=${params.RUBY_IMAGE_REPOSITORY}",
+        "RUBY_IMAGE_TAG=${env.RUBY_IMAGE_TAG ?: 'not-selected'}",
         "RUBY_HOST_PORT=${params.RUBY_HOST_PORT}",
         "RUBY_CONTAINER_PORT=${params.RUBY_CONTAINER_PORT}",
         "RUBY_RESTART_POLICY=${params.RUBY_RESTART_POLICY}",
@@ -643,8 +768,6 @@ def composeEnvironment() {
         "RUBY_CPU_LIMIT=${params.RUBY_CPU_LIMIT}",
         "DOCKER_LOG_MAX_SIZE=${params.DOCKER_LOG_MAX_SIZE}",
         "DOCKER_LOG_MAX_FILES=${params.DOCKER_LOG_MAX_FILES}",
-        "TARGET_IMAGE_REPOSITORY=${env.TARGET_IMAGE_REPOSITORY}",
-        "IMAGE_TAG=${env.IMAGE_TAG}",
         "COMPOSE_PROJECT_NAME=${params.PROJECT_ID}-${params.ENVIRONMENT}"
     ]
 }
