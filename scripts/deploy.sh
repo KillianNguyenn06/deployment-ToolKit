@@ -24,8 +24,13 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+selected_services=()
 case "${SERVICE:-}" in
     go-backend|react-frontend|ruby-service)
+        selected_services+=("${SERVICE}")
+        ;;
+    all)
+        selected_services+=(go-backend react-frontend ruby-service)
         ;;
     *)
         echo "[ERROR] Unsupported or missing SERVICE: ${SERVICE:-<empty>}" >&2
@@ -33,10 +38,27 @@ case "${SERVICE:-}" in
         ;;
 esac
 
-if [[ -z "${TARGET_IMAGE_REPOSITORY:-}" || -z "${IMAGE_TAG:-}" ]]; then
-    echo "[ERROR] TARGET_IMAGE_REPOSITORY and IMAGE_TAG are required." >&2
-    exit 1
-fi
+profile_for_service() {
+    case "$1" in
+        go-backend) echo go ;;
+        react-frontend) echo react ;;
+        ruby-service) echo ruby ;;
+    esac
+}
+
+image_reference_for_service() {
+    case "$1" in
+        go-backend) echo "${GO_IMAGE_REPOSITORY:?GO_IMAGE_REPOSITORY is required}:${GO_IMAGE_TAG:?GO_IMAGE_TAG is required}" ;;
+        react-frontend) echo "${REACT_IMAGE_REPOSITORY:?REACT_IMAGE_REPOSITORY is required}:${REACT_IMAGE_TAG:?REACT_IMAGE_TAG is required}" ;;
+        ruby-service) echo "${RUBY_IMAGE_REPOSITORY:?RUBY_IMAGE_REPOSITORY is required}:${RUBY_IMAGE_TAG:?RUBY_IMAGE_TAG is required}" ;;
+    esac
+}
+
+profile_args=()
+for service in "${selected_services[@]}"; do
+    profile_args+=(--profile "$(profile_for_service "${service}")")
+    image_reference_for_service "${service}" >/dev/null
+done
 
 if [[ ! "${RELEASE_RETENTION:-5}" =~ ^[1-9][0-9]*$ ]]; then
     echo "[ERROR] RELEASE_RETENTION must be a positive whole number." >&2
@@ -99,14 +121,14 @@ COMPOSE=(
     --file "${ROOT_DIR}/compose.yaml"
 )
 
-"${COMPOSE[@]}" config --quiet
+"${COMPOSE[@]}" "${profile_args[@]}" config --quiet
 
 case "${ACTION}" in
     build)
-        "${COMPOSE[@]}" build "${SERVICE}"
+        "${COMPOSE[@]}" "${profile_args[@]}" build "${selected_services[@]}"
         ;;
     deploy)
-        "${COMPOSE[@]}" up --build -d "${SERVICE}"
+        "${COMPOSE[@]}" "${profile_args[@]}" up --build -d "${selected_services[@]}"
         ;;
     *)
         echo "[ERROR] Unsupported action: ${ACTION}. Use build or deploy." >&2
@@ -114,48 +136,54 @@ case "${ACTION}" in
         ;;
 esac
 
-docker image inspect "${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}" \
-    --format 'Image={{.RepoTags}} SizeBytes={{.Size}}'
-docker image ls "${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+for service in "${selected_services[@]}"; do
+    image_reference="$(image_reference_for_service "${service}")"
+    docker image inspect "${image_reference}" \
+        --format 'Image={{.RepoTags}} SizeBytes={{.Size}}'
+    docker image ls "${image_reference}"
+done
 
 if [[ "${ACTION}" == "deploy" ]]; then
-    "${COMPOSE[@]}" ps "${SERVICE}"
-    container_id="$("${COMPOSE[@]}" ps -q "${SERVICE}")"
-    if [[ -z "${container_id}" ]]; then
-        echo "[ERROR] Compose did not return a container for ${SERVICE}." >&2
-        exit 1
-    fi
-    if [[ "$(docker inspect --format '{{.State.Running}}' "${container_id}")" != "true" ]]; then
-        echo "[ERROR] Container ${container_id} is not running." >&2
-        exit 1
-    fi
+    "${COMPOSE[@]}" "${profile_args[@]}" ps "${selected_services[@]}"
+    for service in "${selected_services[@]}"; do
+        container_id="$("${COMPOSE[@]}" "${profile_args[@]}" ps -q "${service}")"
+        if [[ -z "${container_id}" ]]; then
+            echo "[ERROR] Compose did not return a container for ${service}." >&2
+            exit 1
+        fi
+        if [[ "$(docker inspect --format '{{.State.Running}}' "${container_id}")" != "true" ]]; then
+            echo "[ERROR] Container ${container_id} for ${service} is not running." >&2
+            docker logs --tail 100 "${container_id}" >&2 || true
+            exit 1
+        fi
 
-    health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container_id}")"
-    if [[ -n "${health_status}" ]]; then
-        echo "[VERIFY] Waiting for ${SERVICE} health check."
-        for attempt in {1..30}; do
-            health_status="$(docker inspect --format '{{.State.Health.Status}}' "${container_id}")"
-            if [[ "${health_status}" == "healthy" ]]; then
-                break
-            fi
-            if [[ "${health_status}" == "unhealthy" ]]; then
-                echo "[ERROR] Container ${container_id} reported unhealthy." >&2
+        health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container_id}")"
+        if [[ -n "${health_status}" ]]; then
+            echo "[VERIFY] Waiting for ${service} health check."
+            for attempt in {1..30}; do
+                health_status="$(docker inspect --format '{{.State.Health.Status}}' "${container_id}")"
+                if [[ "${health_status}" == "healthy" ]]; then
+                    break
+                fi
+                if [[ "${health_status}" == "unhealthy" ]]; then
+                    echo "[ERROR] Container ${container_id} for ${service} reported unhealthy." >&2
+                    docker logs --tail 100 "${container_id}" >&2
+                    exit 1
+                fi
+                sleep 2
+            done
+            if [[ "${health_status}" != "healthy" ]]; then
+                echo "[ERROR] Container ${container_id} for ${service} did not become healthy within 60 seconds." >&2
                 docker logs --tail 100 "${container_id}" >&2
                 exit 1
             fi
-            sleep 2
-        done
-        if [[ "${health_status}" != "healthy" ]]; then
-            echo "[ERROR] Container ${container_id} did not become healthy within 60 seconds." >&2
-            docker logs --tail 100 "${container_id}" >&2
-            exit 1
+            echo "[VERIFY] ${service} is healthy."
         fi
-        echo "[VERIFY] ${SERVICE} is healthy."
-    fi
+    done
 fi
 
 cleanup_managed_images
 cleanup_build_cache
 cleanup_old_releases
 
-echo "[DONE] ${ACTION} completed for ${SERVICE}: ${TARGET_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+echo "[DONE] ${ACTION} completed for: ${selected_services[*]}"

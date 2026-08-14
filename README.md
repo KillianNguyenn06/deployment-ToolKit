@@ -4,12 +4,12 @@ This repository provides one parameterized Jenkins Pipeline for building or depl
 
 ```text
 Jenkins parameters
-  -> select Go, React or Ruby configuration
-  -> checkout toolkit and selected application repository
-  -> run technology-specific validation
+  -> select Go, React, Ruby or all
+  -> checkout selected application repositories in parallel
+  -> run selected technology validations in parallel
   -> rsync an isolated release over SSH
-  -> build or deploy the selected Compose service
-  -> verify the image and container
+  -> build or deploy selected Compose services together
+  -> verify every selected image and container
 ```
 
 ## 1. Application contracts
@@ -51,7 +51,7 @@ The Ruby image uses a separate dependency builder and a non-root Puma runtime. J
 
 ## 2. Resource and storage safeguards
 
-Every deployed service has explicit CPU, memory and process limits. Docker JSON logs rotate at `10m` with three files by default, preventing an application that prints continuously from filling the server disk.
+Every deployed service has explicit CPU, memory and process limits. Docker JSON logs rotate at `10m` with three files by default, preventing an application that prints continuously from filling the server disk. For `SERVICE=all`, limits remain per container, so the maximum combined runtime allocation is the sum of the three selected service limits.
 
 After a successful build or deployment, the toolkit:
 
@@ -68,14 +68,14 @@ See [`docs/RESOURCE_SAFEGUARDS.md`](docs/RESOURCE_SAFEGUARDS.md) for parameter s
 
 ## 3. Service configuration
 
-The reusable service map is defined in `Jenkinsfile` by `serviceConfiguration`. It maps each Jenkins `SERVICE` value to:
+The reusable service map is defined in `Jenkinsfile` by `serviceConfiguration`. It maps each individual Jenkins service to:
 
 - its repository URL parameter;
 - image repository parameter;
 - host and container port parameters;
 - isolated source directory.
 
-The shared Pipeline stages are reused by all three technologies. Multi-service `all` execution and parallel source checkout are added after each service succeeds individually.
+The shared Pipeline stages are reused by all three technologies. `SERVICE=all` expands to all service-map entries, checks out and tests the three repositories in parallel, assigns each image a build-and-commit tag, and sends the selected service list to Docker Compose. Unique host ports are required before any checkout or deployment begins.
 
 ## 4. Manual Docker verification
 
@@ -153,10 +153,10 @@ The Pipeline enforces strict host-key checking.
 
 Create one **Pipeline script from SCM** job pointing to this toolkit repository and use `Jenkinsfile` as the script path.
 
-During Phase 4 testing, configure its toolkit branch as:
+During Phase 4B testing, configure its toolkit branch as:
 
 ```text
-*/feature/ruby-multiservice-deploy
+*/feature/parallel-multiservice-deploy
 ```
 
 After review and merge, switch the job back to:
@@ -256,7 +256,27 @@ curl http://localhost:9292/health
 
 The Jenkins job also waits for the `/health` Docker health check and prints recent container logs if readiness fails.
 
-## 11. Releases and IR evidence
+## 11. Parallel multi-service build or deployment
+
+Set `SERVICE=all` to process Go, React and Ruby in one Jenkins run. Supply all three repository URLs and branches, and keep the host ports unique. A suitable test sequence is:
+
+```text
+First run:  SERVICE=all, ACTION=build
+Second run: SERVICE=all, ACTION=deploy
+```
+
+The pipeline performs these operations:
+
+1. validates the three selected configurations and detects host-port collisions;
+2. checks out the three application repositories in parallel;
+3. runs Go, React and Ruby validation in parallel when `RUN_TESTS=true`;
+4. synchronizes the three source trees into one isolated remote release;
+5. invokes Docker Compose once with the `go`, `react` and `ruby` profiles;
+6. records each image tag and size, then verifies every deployed container.
+
+Parallel validation containers are each limited to `1g` memory, `1.0` CPU and 256 processes. Their temporary combined peak can therefore be higher than a single-service run. `disableConcurrentBuilds()` prevents two complete Jenkins jobs from consuming the Docker host simultaneously.
+
+## 12. Releases and IR evidence
 
 Every build creates an isolated remote directory:
 
@@ -266,12 +286,11 @@ Every build creates an isolated remote directory:
 
 The Jenkins console records source checkout, validation, SSH transfer, Docker build, container state, image tag and image size. Record a manual baseline before claiming a percentage improvement, using the same service, commit, host and network conditions.
 
-## 12. Next phase
+## 13. Next phase
 
-After Ruby build/deployment and Go/React regressions succeed:
+After `SERVICE=all` build/deployment and single-service regressions succeed:
 
-1. add `SERVICE=all` and Compose profiles;
-2. check out multiple repositories and validate services in parallel;
-3. validate unique host ports before deployment;
-4. deploy all three services from one Jenkins click;
-5. finalize measurements, rollback behavior and the Wiki guide.
+1. compare the measured all-service duration with the previous manual baseline;
+2. record Jenkins checkout/build logs and Docker image sizes as IR evidence;
+3. finalize rollback behavior and the Wiki usage guide;
+4. consider the lead toolkit's manifest-driven dynamic-service model only if projects need more than the current Go/React/Ruby slots.

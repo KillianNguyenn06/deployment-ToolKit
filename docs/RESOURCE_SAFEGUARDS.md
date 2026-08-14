@@ -17,7 +17,9 @@ These controls reduce risk from toolkit-managed services. They do not set limits
 
 `ACTION=build` builds an image but does not start an application container. Build and test containers have temporary CPU, memory and process limits.
 
-`ACTION=deploy` builds the image and uses Docker Compose to create or recreate the selected application container. Runtime limits, restart policy and log rotation apply to that new container.
+`ACTION=deploy` builds the image and uses Docker Compose to create or recreate the selected application containers. Runtime limits, restart policy and log rotation apply to each new container.
+
+With `SERVICE=all`, checkout, validation and Docker build work may overlap. Each validation container is bounded, but their temporary resource use is cumulative. The deployed Go, React and Ruby defaults allow up to approximately 768 MB RAM and 1.5 CPU cores in total (`3 × 256m`, `3 × 0.50 CPU`). Account for Docker build overhead and the host operating system separately.
 
 Existing containers created by an older toolkit version do not receive the new limits automatically. Run a successful deployment with the updated toolkit to recreate them.
 
@@ -79,7 +81,7 @@ Use these initial values for a long-running Rack/Puma service:
 | `RUBY_CPU_LIMIT` | `0.50` | Maximum CPU for the running Ruby/Puma container |
 | `RUBY_RESTART_POLICY` | `unless-stopped` | Keep the Ruby backend available after Docker or the host restarts |
 
-The Jenkins Ruby validation container is limited to 1 GB RAM, one CPU core and 256 processes. The deployed service must pass its `/health` check within 60 seconds.
+The Jenkins Ruby validation container is limited to 1 GB RAM, one CPU core and 256 processes. The deployed service must pass its `/health` check within 60 seconds. The Go validation container has the same temporary limits.
 
 ## 4. What happens when a limit is reached
 
@@ -114,7 +116,7 @@ Small filesystem and metadata overhead may make the actual value slightly differ
 
 ## 5. Automatic cleanup after a successful job
 
-Cleanup runs only after the selected service builds or deploys successfully.
+Cleanup runs only after all selected services build or deploy successfully.
 
 ### Release directories
 
@@ -211,7 +213,7 @@ Larger React build heap:   NODE_BUILD_MEMORY_MB=1024
 Small Ruby/Puma service:   256m, 0.50 CPU
 ```
 
-Do not set a service limit close to all memory available on the Docker host. Multiple services and Docker builds may run at the same time in later phases.
+Do not set a service limit close to all memory available on the Docker host. For an `all` run, add the three runtime limits together and leave capacity for parallel validation, Docker builds, Jenkins and the operating system. `disableConcurrentBuilds()` prevents multiple complete runs of this Jenkins job from overlapping.
 
 ## 8. Troubleshooting
 

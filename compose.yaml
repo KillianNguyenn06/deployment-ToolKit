@@ -1,6 +1,7 @@
 services:
   go-backend:
-    image: "${GO_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    profiles: ["go", "all"]
+    image: "${GO_IMAGE_REPOSITORY}:${GO_IMAGE_TAG}"
     build:
       context: "${GO_SOURCE_DIR}"
       dockerfile: "${GO_DOCKERFILE}"
@@ -33,7 +34,8 @@ services:
       - application
 
   react-frontend:
-    image: "${REACT_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    profiles: ["react", "all"]
+    image: "${REACT_IMAGE_REPOSITORY}:${REACT_IMAGE_TAG}"
     build:
       context: "${REACT_SOURCE_DIR}"
       dockerfile: "${REACT_DOCKERFILE}"
@@ -63,7 +65,8 @@ services:
       - application
 
   ruby-service:
-    image: "${RUBY_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    profiles: ["ruby", "all"]
+    image: "${RUBY_IMAGE_REPOSITORY}:${RUBY_IMAGE_TAG}"
     build:
       context: "${RUBY_SOURCE_DIR}"
       dockerfile: "${RUBY_DOCKERFILE}"
