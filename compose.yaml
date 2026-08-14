@@ -16,7 +16,7 @@ services:
       PORT: "${GO_CONTAINER_PORT:-8080}"
     ports:
       - "${GO_HOST_PORT:-8081}:${GO_CONTAINER_PORT:-8080}"
-    restart: "${GO_RESTART_POLICY:-no}"
+    restart: "${GO_RESTART_POLICY:-unless-stopped}"
     mem_limit: "${GO_MEMORY_LIMIT:-256m}"
     cpus: "${GO_CPU_LIMIT:-0.50}"
     pids_limit: 128
@@ -59,6 +59,51 @@ services:
       com.deployment-toolkit.managed: "true"
       com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
       com.deployment-toolkit.service: "react-frontend"
+    networks:
+      - application
+
+  ruby-service:
+    image: "${RUBY_IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    build:
+      context: "${RUBY_SOURCE_DIR}"
+      dockerfile: "${RUBY_DOCKERFILE}"
+      args:
+        RUBY_VERSION: "${RUBY_VERSION}"
+      labels:
+        com.deployment-toolkit.managed: "true"
+        com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+        com.deployment-toolkit.service: "ruby-service"
+    environment:
+      APP_ENV: "${APP_ENV:-dev}"
+      PORT: "${RUBY_CONTAINER_PORT:-9292}"
+      RACK_ENV: production
+    ports:
+      - "${RUBY_HOST_PORT:-9292}:${RUBY_CONTAINER_PORT:-9292}"
+    restart: "${RUBY_RESTART_POLICY:-unless-stopped}"
+    mem_limit: "${RUBY_MEMORY_LIMIT:-256m}"
+    cpus: "${RUBY_CPU_LIMIT:-0.50}"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+        max-file: "${DOCKER_LOG_MAX_FILES:-3}"
+    healthcheck:
+      test:
+        - CMD
+        - ruby
+        - -rnet/http
+        - -ruri
+        - -e
+        - "response=Net::HTTP.get_response(URI('http://127.0.0.1:9292/health')); exit(response.is_a?(Net::HTTPSuccess) ? 0 : 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    labels:
+      com.deployment-toolkit.managed: "true"
+      com.deployment-toolkit.project: "${COMPOSE_PROJECT_NAME:-deployment-dev}"
+      com.deployment-toolkit.service: "ruby-service"
     networks:
       - application
 

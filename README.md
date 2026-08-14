@@ -1,10 +1,10 @@
-# Deployment Toolkit — Go and React SSH deployment
+# Deployment Toolkit — Go, React and Ruby SSH deployment
 
-This repository provides one parameterized Jenkins Pipeline for building or deploying a Go backend or React frontend on an internal Dev/QC Docker server over SSH. Application repositories remain separate from the deployment logic.
+This repository provides one parameterized Jenkins Pipeline for building or deploying Go, React and Ruby services on an internal Dev/QC Docker server over SSH. Application repositories remain separate from the deployment logic.
 
 ```text
 Jenkins parameters
-  -> select Go or React configuration
+  -> select Go, React or Ruby configuration
   -> checkout toolkit and selected application repository
   -> run technology-specific validation
   -> rsync an isolated release over SSH
@@ -37,6 +37,18 @@ The React repository must:
 The build stage uses Node.js. The final image contains only Nginx and the generated `dist/` files.
 `NODE_BUILD_MEMORY_MB` caps the Node.js heap during linting and production builds.
 
+### Ruby
+
+The Ruby repository must:
+
+- contain a `Gemfile` at its root (`Gemfile.lock` is strongly recommended);
+- expose a Rack-compatible `config.ru` application;
+- provide the test entry configured by `RUBY_TEST_FILE`;
+- listen on the `PORT` environment variable, default `9292`;
+- provide `GET /health` for deployment verification.
+
+The Ruby image uses a separate dependency builder and a non-root Puma runtime. Jenkins waits for the Docker health check before declaring `ACTION=deploy` successful.
+
 ## 2. Resource and storage safeguards
 
 Every deployed service has explicit CPU, memory and process limits. Docker JSON logs rotate at `10m` with three files by default, preventing an application that prints continuously from filling the server disk.
@@ -63,7 +75,7 @@ The reusable service map is defined in `Jenkinsfile` by `serviceConfiguration`. 
 - host and container port parameters;
 - isolated source directory.
 
-The shared Pipeline stages do not need to be copied for each technology. Ruby and multi-service execution will be added after both Go and React paths are verified.
+The shared Pipeline stages are reused by all three technologies. Multi-service `all` execution and parallel source checkout are added after each service succeeds individually.
 
 ## 4. Manual Docker verification
 
@@ -74,6 +86,7 @@ cp .env.example .env
 docker compose config --quiet
 docker compose build go-backend
 docker compose build react-frontend
+docker compose build ruby-service
 ```
 
 To deploy one service manually:
@@ -140,10 +153,10 @@ The Pipeline enforces strict host-key checking.
 
 Create one **Pipeline script from SCM** job pointing to this toolkit repository and use `Jenkinsfile` as the script path.
 
-During Phase 3 testing, configure its toolkit branch as:
+During Phase 4 testing, configure its toolkit branch as:
 
 ```text
-*/feature/react-service-deploy
+*/feature/ruby-multiservice-deploy
 ```
 
 After review and merge, switch the job back to:
@@ -175,7 +188,7 @@ Use values matching the Go application:
 | `GO_MEMORY_LIMIT` | `256m` |
 | `GO_CPU_LIMIT` | `0.50` |
 
-The unused React parameters may retain their defaults.
+The unused React and Ruby parameters may retain their defaults.
 
 ## 9. React build or deployment
 
@@ -213,7 +226,37 @@ curl http://localhost:3000/
 React is served over HTTP, so `curl` is a valid runtime check.
 The React container port remains `80` because that is the port used by the production Nginx runtime; change only the host port when avoiding a server-side conflict.
 
-## 10. Releases and IR evidence
+## 10. Ruby build or deployment
+
+Use these initial values for the Ruby health service:
+
+| Parameter | Value |
+|---|---|
+| `SERVICE` | `ruby-service` |
+| `ACTION` | `build`, then `deploy` |
+| `PROJECT_ID` | `ruby-health` |
+| `RUBY_REPO_URL` | `https://github.com/KillianNguyenn06/ruby-health-service.git` |
+| `RUBY_REPO_BRANCH` | `develop` |
+| `GIT_CREDENTIALS_ID` | Blank for the public HTTPS repository |
+| `RUBY_VERSION` | `3.4.5` |
+| `RUBY_TEST_FILE` | `test/app_test.rb` |
+| `RUBY_IMAGE_REPOSITORY` | `local/ruby-health-service` |
+| `RUBY_HOST_PORT` | `9292` |
+| `RUBY_CONTAINER_PORT` | `9292` |
+| `RUBY_RESTART_POLICY` | `unless-stopped` |
+| `RUBY_MEMORY_LIMIT` | `256m` |
+| `RUBY_CPU_LIMIT` | `0.50` |
+
+After `ACTION=deploy`, verify the Ruby service from the Ubuntu server:
+
+```bash
+curl http://localhost:9292/
+curl http://localhost:9292/health
+```
+
+The Jenkins job also waits for the `/health` Docker health check and prints recent container logs if readiness fails.
+
+## 11. Releases and IR evidence
 
 Every build creates an isolated remote directory:
 
@@ -223,12 +266,12 @@ Every build creates an isolated remote directory:
 
 The Jenkins console records source checkout, validation, SSH transfer, Docker build, container state, image tag and image size. Record a manual baseline before claiming a percentage improvement, using the same service, commit, host and network conditions.
 
-## 11. Next phase
+## 12. Next phase
 
-After Go regression testing and React build/deployment succeed:
+After Ruby build/deployment and Go/React regressions succeed:
 
-1. add the Ruby service configuration and Dockerfile;
-2. add `SERVICE=all`;
-3. check out multiple repositories and build independent services in parallel;
-4. add health checks, retention/cleanup and rollback behavior;
-5. finalize measurements and the Wiki guide.
+1. add `SERVICE=all` and Compose profiles;
+2. check out multiple repositories and validate services in parallel;
+3. validate unique host ports before deployment;
+4. deploy all three services from one Jenkins click;
+5. finalize measurements, rollback behavior and the Wiki guide.
