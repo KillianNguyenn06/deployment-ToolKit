@@ -66,6 +66,8 @@ These settings apply when Compose creates or recreates a container. They do not 
 
 See [`docs/RESOURCE_SAFEGUARDS.md`](docs/RESOURCE_SAFEGUARDS.md) for parameter selection, verification commands and troubleshooting.
 
+See [`docs/HOW_TO_USE.md`](docs/HOW_TO_USE.md) for complete setup, Jenkins configuration, parameter reference, operating steps, troubleshooting and IR evidence.
+
 ## 3. Service configuration
 
 The reusable service map is defined in `Jenkinsfile` by `serviceConfiguration`. It maps each individual Jenkins service to:
@@ -151,21 +153,13 @@ The Pipeline enforces strict host-key checking.
 
 ## 7. Jenkins job configuration
 
-Create one **Pipeline script from SCM** job pointing to this toolkit repository and use `Jenkinsfile` as the script path.
-
-During Phase 4B testing, configure its toolkit branch as:
-
-```text
-*/feature/parallel-multiservice-deploy
-```
-
-After review and merge, switch the job back to:
+Create one **Pipeline script from SCM** job pointing to this toolkit repository and use `Jenkinsfile` as the script path. Use the integrated Dev/QC branch:
 
 ```text
 */develop
 ```
 
-Run the job once after changing the toolkit branch so Jenkins loads the updated parameters.
+During development, temporarily point the job to the feature or fix branch being tested. Run the job once after changing the toolkit branch so Jenkins loads the updated parameters, then return it to `*/develop` after the PR is merged.
 
 ## 8. Go build or deployment
 
@@ -228,19 +222,19 @@ The React container port remains `80` because that is the port used by the produ
 
 ## 10. Ruby build or deployment
 
-Use these initial values for the Ruby health service:
+Use values matching the target Ruby service:
 
 | Parameter | Value |
 |---|---|
 | `SERVICE` | `ruby-service` |
 | `ACTION` | `build`, then `deploy` |
-| `PROJECT_ID` | `ruby-health` |
-| `RUBY_REPO_URL` | `https://github.com/KillianNguyenn06/ruby-health-service.git` |
+| `PROJECT_ID` | A reusable project slug, such as `customer-portal` |
+| `RUBY_REPO_URL` | Ruby repository SSH or HTTPS URL |
 | `RUBY_REPO_BRANCH` | `develop` |
 | `GIT_CREDENTIALS_ID` | Blank for the public HTTPS repository |
 | `RUBY_VERSION` | `3.4.5` |
 | `RUBY_TEST_FILE` | `test/app_test.rb` |
-| `RUBY_IMAGE_REPOSITORY` | `local/ruby-health-service` |
+| `RUBY_IMAGE_REPOSITORY` | `local/ruby-service` |
 | `RUBY_HOST_PORT` | `9292` |
 | `RUBY_CONTAINER_PORT` | `9292` |
 | `RUBY_RESTART_POLICY` | `unless-stopped` |
@@ -293,4 +287,4 @@ After `SERVICE=all` build/deployment and single-service regressions succeed:
 1. compare the measured all-service duration with the previous manual baseline;
 2. record Jenkins checkout/build logs and Docker image sizes as IR evidence;
 3. finalize rollback behavior and the Wiki usage guide;
-4. consider the lead toolkit's manifest-driven dynamic-service model only if projects need more than the current Go/React/Ruby slots.
+4. consider a manifest-driven dynamic-service model only if projects need more than the current Go/React/Ruby slots.
