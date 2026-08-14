@@ -25,7 +25,7 @@ source "${ENV_FILE}"
 set +a
 
 case "${SERVICE:-}" in
-    go-backend|react-frontend)
+    go-backend|react-frontend|ruby-service)
         ;;
     *)
         echo "[ERROR] Unsupported or missing SERVICE: ${SERVICE:-<empty>}" >&2
@@ -128,6 +128,29 @@ if [[ "${ACTION}" == "deploy" ]]; then
     if [[ "$(docker inspect --format '{{.State.Running}}' "${container_id}")" != "true" ]]; then
         echo "[ERROR] Container ${container_id} is not running." >&2
         exit 1
+    fi
+
+    health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container_id}")"
+    if [[ -n "${health_status}" ]]; then
+        echo "[VERIFY] Waiting for ${SERVICE} health check."
+        for attempt in {1..30}; do
+            health_status="$(docker inspect --format '{{.State.Health.Status}}' "${container_id}")"
+            if [[ "${health_status}" == "healthy" ]]; then
+                break
+            fi
+            if [[ "${health_status}" == "unhealthy" ]]; then
+                echo "[ERROR] Container ${container_id} reported unhealthy." >&2
+                docker logs --tail 100 "${container_id}" >&2
+                exit 1
+            fi
+            sleep 2
+        done
+        if [[ "${health_status}" != "healthy" ]]; then
+            echo "[ERROR] Container ${container_id} did not become healthy within 60 seconds." >&2
+            docker logs --tail 100 "${container_id}" >&2
+            exit 1
+        fi
+        echo "[VERIFY] ${SERVICE} is healthy."
     fi
 fi
 

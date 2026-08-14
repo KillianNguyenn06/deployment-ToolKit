@@ -10,7 +10,7 @@ pipeline {
     parameters {
         choice(
             name: 'SERVICE',
-            choices: ['go-backend', 'react-frontend'],
+            choices: ['go-backend', 'react-frontend', 'ruby-service'],
             description: 'Application service to build or deploy.'
         )
         choice(
@@ -47,6 +47,16 @@ pipeline {
             name: 'REACT_REPO_BRANCH',
             defaultValue: 'develop',
             description: 'Branch in the React application repository. Blank falls back to develop.'
+        )
+        string(
+            name: 'RUBY_REPO_URL',
+            defaultValue: '',
+            description: 'HTTPS or SSH URL of the Ruby application repository.'
+        )
+        string(
+            name: 'RUBY_REPO_BRANCH',
+            defaultValue: 'develop',
+            description: 'Branch in the Ruby application repository. Blank falls back to develop.'
         )
         string(
             name: 'GIT_CREDENTIALS_ID',
@@ -132,6 +142,46 @@ pipeline {
             name: 'REACT_CPU_LIMIT',
             defaultValue: '0.50',
             description: 'Maximum CPU cores for the React/Nginx container.'
+        )
+        string(
+            name: 'RUBY_VERSION',
+            defaultValue: '3.4.5',
+            description: 'Ruby builder/runtime image version compatible with the application.'
+        )
+        string(
+            name: 'RUBY_TEST_FILE',
+            defaultValue: 'test/app_test.rb',
+            description: 'Ruby test entry file, relative to the application repository root.'
+        )
+        string(
+            name: 'RUBY_IMAGE_REPOSITORY',
+            defaultValue: 'local/ruby-service',
+            description: 'Ruby Docker image repository/name, without the tag.'
+        )
+        string(
+            name: 'RUBY_HOST_PORT',
+            defaultValue: '9292',
+            description: 'Host port used to access the Ruby application.'
+        )
+        string(
+            name: 'RUBY_CONTAINER_PORT',
+            defaultValue: '9292',
+            description: 'Puma port inside the Ruby container.'
+        )
+        choice(
+            name: 'RUBY_RESTART_POLICY',
+            choices: ['unless-stopped', 'on-failure', 'no'],
+            description: 'Restart behavior for the long-running Ruby service.'
+        )
+        string(
+            name: 'RUBY_MEMORY_LIMIT',
+            defaultValue: '256m',
+            description: 'Maximum runtime memory for the Ruby/Puma container.'
+        )
+        string(
+            name: 'RUBY_CPU_LIMIT',
+            defaultValue: '0.50',
+            description: 'Maximum CPU cores for the Ruby/Puma container.'
         )
         string(
             name: 'DOCKER_LOG_MAX_SIZE',
@@ -235,25 +285,32 @@ pipeline {
                     if (!(params.GO_BUILD_PACKAGE ==~ /[A-Za-z0-9._\/-]+/)) {
                         error('GO_BUILD_PACKAGE contains unsupported characters.')
                     }
-                    ['GO_IMAGE_REPOSITORY', 'REACT_IMAGE_REPOSITORY'].each { parameterName ->
+                    if (!(params.RUBY_TEST_FILE ==~ /[A-Za-z0-9._\/-]+/)) {
+                        error('RUBY_TEST_FILE contains unsupported characters.')
+                    }
+                    ['GO_IMAGE_REPOSITORY', 'REACT_IMAGE_REPOSITORY', 'RUBY_IMAGE_REPOSITORY'].each { parameterName ->
                         if (!(params[parameterName] ==~ /[A-Za-z0-9._\/-]+/)) {
                             error("${parameterName} contains unsupported characters.")
                         }
                     }
                     validateVersion(params.GO_VERSION, 'GO_VERSION')
                     validateVersion(params.NODE_VERSION, 'NODE_VERSION')
-                    ['GO_HOST_PORT', 'GO_CONTAINER_PORT', 'REACT_HOST_PORT', 'REACT_CONTAINER_PORT'].each { parameterName ->
+                    validateVersion(params.RUBY_VERSION, 'RUBY_VERSION')
+                    ['GO_HOST_PORT', 'GO_CONTAINER_PORT', 'REACT_HOST_PORT', 'REACT_CONTAINER_PORT', 'RUBY_HOST_PORT', 'RUBY_CONTAINER_PORT'].each { parameterName ->
                         validatePort(params[parameterName], parameterName)
                     }
                     if (params.REACT_CONTAINER_PORT != '80') {
                         error('REACT_CONTAINER_PORT must be 80 because the production Nginx image listens on port 80.')
                     }
-                    ['GO_MEMORY_LIMIT', 'REACT_MEMORY_LIMIT'].each { parameterName ->
+                    if (params.RUBY_CONTAINER_PORT != '9292') {
+                        error('RUBY_CONTAINER_PORT must be 9292 because the production Puma image and health check use port 9292.')
+                    }
+                    ['GO_MEMORY_LIMIT', 'REACT_MEMORY_LIMIT', 'RUBY_MEMORY_LIMIT'].each { parameterName ->
                         if (!(params[parameterName] ==~ /[1-9][0-9]*[kKmMgG]/)) {
                             error("${parameterName} must be a positive Docker memory value such as 256m or 1g.")
                         }
                     }
-                    ['GO_CPU_LIMIT', 'REACT_CPU_LIMIT'].each { parameterName ->
+                    ['GO_CPU_LIMIT', 'REACT_CPU_LIMIT', 'RUBY_CPU_LIMIT'].each { parameterName ->
                         def cpuValue = params[parameterName]
                         def isNumeric = cpuValue ==~ /[0-9]+(\.[0-9]+)?/
                         def isZero = cpuValue ==~ /0+(\.0+)?/
@@ -345,6 +402,18 @@ pipeline {
                                 "node:$NODE_VERSION-bookworm-slim" \
                                 sh -c 'cp -a /source/. /tmp/app && cd /tmp/app && npm ci && npm run lint && npm run build'
                         '''
+                    } else if (params.SERVICE == 'ruby-service') {
+                        sh '''
+                            set -eu
+                            docker run --rm \
+                                --memory=1g \
+                                --cpus=1.0 \
+                                --pids-limit=256 \
+                                -v "$SOURCE_DIR:/app:ro" \
+                                -w /app \
+                                "ruby:$RUBY_VERSION-slim" \
+                                ruby -Itest "$RUBY_TEST_FILE"
+                        '''
                     }
                 }
             }
@@ -383,6 +452,15 @@ REACT_CONTAINER_PORT=${params.REACT_CONTAINER_PORT}
 REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}
 REACT_MEMORY_LIMIT=${params.REACT_MEMORY_LIMIT}
 REACT_CPU_LIMIT=${params.REACT_CPU_LIMIT}
+RUBY_SOURCE_DIR=${env.REMOTE_RELEASE_DIR}/sources/ruby-service
+RUBY_DOCKERFILE=${env.REMOTE_RELEASE_DIR}/docker/ruby.Dockerfile
+RUBY_VERSION=${params.RUBY_VERSION}
+RUBY_IMAGE_REPOSITORY=${params.RUBY_IMAGE_REPOSITORY}
+RUBY_HOST_PORT=${params.RUBY_HOST_PORT}
+RUBY_CONTAINER_PORT=${params.RUBY_CONTAINER_PORT}
+RUBY_RESTART_POLICY=${params.RUBY_RESTART_POLICY}
+RUBY_MEMORY_LIMIT=${params.RUBY_MEMORY_LIMIT}
+RUBY_CPU_LIMIT=${params.RUBY_CPU_LIMIT}
 DOCKER_LOG_MAX_SIZE=${params.DOCKER_LOG_MAX_SIZE}
 DOCKER_LOG_MAX_FILES=${params.DOCKER_LOG_MAX_FILES}
 RELEASE_RETENTION=${params.RELEASE_RETENTION}
@@ -490,6 +568,12 @@ def serviceConfiguration(String serviceName) {
             branchParameter: 'REACT_REPO_BRANCH',
             imageParameter: 'REACT_IMAGE_REPOSITORY',
             sourceSubdir: 'react-frontend'
+        ],
+        'ruby-service': [
+            repoParameter: 'RUBY_REPO_URL',
+            branchParameter: 'RUBY_REPO_BRANCH',
+            imageParameter: 'RUBY_IMAGE_REPOSITORY',
+            sourceSubdir: 'ruby-service'
         ]
     ]
 
@@ -548,6 +632,15 @@ def composeEnvironment() {
         "REACT_RESTART_POLICY=${params.REACT_RESTART_POLICY}",
         "REACT_MEMORY_LIMIT=${params.REACT_MEMORY_LIMIT}",
         "REACT_CPU_LIMIT=${params.REACT_CPU_LIMIT}",
+        "RUBY_SOURCE_DIR=${env.WORKSPACE}/sources/ruby-service",
+        "RUBY_DOCKERFILE=${env.WORKSPACE}/docker/ruby.Dockerfile",
+        "RUBY_VERSION=${params.RUBY_VERSION}",
+        "RUBY_IMAGE_REPOSITORY=${params.RUBY_IMAGE_REPOSITORY}",
+        "RUBY_HOST_PORT=${params.RUBY_HOST_PORT}",
+        "RUBY_CONTAINER_PORT=${params.RUBY_CONTAINER_PORT}",
+        "RUBY_RESTART_POLICY=${params.RUBY_RESTART_POLICY}",
+        "RUBY_MEMORY_LIMIT=${params.RUBY_MEMORY_LIMIT}",
+        "RUBY_CPU_LIMIT=${params.RUBY_CPU_LIMIT}",
         "DOCKER_LOG_MAX_SIZE=${params.DOCKER_LOG_MAX_SIZE}",
         "DOCKER_LOG_MAX_FILES=${params.DOCKER_LOG_MAX_FILES}",
         "TARGET_IMAGE_REPOSITORY=${env.TARGET_IMAGE_REPOSITORY}",

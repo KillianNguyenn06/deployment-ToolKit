@@ -69,6 +69,18 @@ Use these initial values:
 
 The Jenkins React validation container is also limited to 1 GB RAM, one CPU core and 256 processes.
 
+### Ruby backend service
+
+Use these initial values for a long-running Rack/Puma service:
+
+| Parameter | Recommended value | Meaning |
+|---|---:|---|
+| `RUBY_MEMORY_LIMIT` | `256m` | Maximum memory for the running Ruby/Puma container |
+| `RUBY_CPU_LIMIT` | `0.50` | Maximum CPU for the running Ruby/Puma container |
+| `RUBY_RESTART_POLICY` | `unless-stopped` | Keep the Ruby backend available after Docker or the host restarts |
+
+The Jenkins Ruby validation container is limited to 1 GB RAM, one CPU core and 256 processes. The deployed service must pass its `/health` check within 60 seconds.
+
 ## 4. What happens when a limit is reached
 
 ### Memory
@@ -196,6 +208,7 @@ Examples:
 Small Go or Nginx service: 256m, 0.50 CPU
 Larger Go API:             512m, 1.00 CPU
 Larger React build heap:   NODE_BUILD_MEMORY_MB=1024
+Small Ruby/Puma service:   256m, 0.50 CPU
 ```
 
 Do not set a service limit close to all memory available on the Docker host. Multiple services and Docker builds may run at the same time in later phases.
