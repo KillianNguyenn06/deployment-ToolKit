@@ -23,6 +23,7 @@ RUN bundle install \
 FROM ruby:${RUBY_VERSION}-slim
 
 ENV BUNDLE_PATH=/usr/local/bundle \
+    BUNDLE_FROZEN=true \
     BUNDLE_WITHOUT=development:test \
     PORT=9292 \
     RACK_ENV=production
@@ -33,6 +34,9 @@ RUN groupadd --gid 10001 app \
 WORKDIR /app
 
 COPY --from=builder /usr/local/bundle /usr/local/bundle
+# The builder always resolves a lockfile, even when the source repository does
+# not provide one. Carry that exact resolution into the non-root runtime image.
+COPY --from=builder --chown=app:app /app/Gemfile.lock ./Gemfile.lock
 COPY --chown=app:app . .
 
 USER app:app
